@@ -1,0 +1,43 @@
+{
+  "welcomeFile": "/index.html",
+  "authenticationMethod": "route",
+  "sessionTimeout": 30,
+  "logout": {
+    "logoutEndpoint": "/do/logout",
+    "logoutPage": "/index.html"
+  },
+  "destinations": [
+    {
+      "name": "ncoreshift-srv",
+      "logoutPath": "/do/logout",
+      "logoutMethod": "POST"
+    }
+  ],
+  "routes": [
+    {
+      "source": "^/api/(.*)$",
+      "target": "/api/$1",
+      "destination": "ncoreshift-srv",
+      "authenticationType": "xsuaa",
+      "csrfProtection": true
+    },
+    {
+      "source": "^/health$",
+      "target": "/health",
+      "destination": "ncoreshift-srv",
+      "authenticationType": "none"
+    },
+    {
+      "source": "^/do/logout$",
+      "logout": {
+        "logoutEndpoint": "/do/logout"
+      }
+    },
+    {
+      "source": "^/(.*)$",
+      "target": "/$1",
+      "localDir": "dist",
+      "authenticationType": "xsuaa"
+    }
+  ]
+}
