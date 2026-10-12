@@ -4,12 +4,26 @@
  * Public exports for the NCoreIQ source provider integration.
  *
  * Architecture:
- *   NCoreIQClient        — HTTP client for N-CoreIQ REST API v1
- *   NCoreIQSourceProvider — CodeSourceProvider implementation
- *   types                — N-CoreIQ DTO and N-CoreShift mapping types
+ *   NCoreIQClient             — HTTP client for N-CoreIQ REST API v1
+ *   NCoreIQSourceProvider     — CodeSourceProvider implementation
+ *   NCoreIQTokenProvider      — XSUAA client_credentials token provider (m2m auth)
+ *   types                     — N-CoreIQ DTO and N-CoreShift mapping types
  *
- * SERVICE_TO_SERVICE_AUTH: DEFERRED UNTIL N-CORESHIFT BTP/XSUAA
- * APPLICATION IDENTITY IS ESTABLISHED.
+ * Machine-to-machine authentication (Foundation C):
+ *   NCOREIQ_AUTH_MODE=xsuaa   → XSUAAClientCredentialsTokenProvider
+ *   NCOREIQ_AUTH_MODE=disabled → DisabledModeTokenProvider (local dev only)
+ *
+ *   Production usage:
+ *     const provider = createNCoreIQTokenProvider(
+ *       getConfig().xsuaa,
+ *       getConfig().ncoreiq!.authMode,
+ *       isProduction()
+ *     );
+ *     const client = new NCoreIQSourceProvider(
+ *       { baseUrl, tokenProvider: provider },
+ *       store, audit, jobs,
+ *       { authMode: 'xsuaa', isProduction: true }
+ *     );
  */
 
 // Types (DTOs and domain mapping)
@@ -67,6 +81,15 @@ export {
 // Client
 export { NCoreIQClient, NCOREIQ_PATHS } from './NCoreIQClient.js';
 
+// Token provider (XSUAA machine-to-machine authentication)
+export type { NCoreIQTokenProvider, XSUAABindingConfig } from './NCoreIQTokenProvider.js';
+export {
+  XSUAAClientCredentialsTokenProvider,
+  DisabledModeTokenProvider,
+  NCoreIQTokenAcquisitionError,
+  createNCoreIQTokenProvider,
+} from './NCoreIQTokenProvider.js';
+
 // Provider and store
 export {
   NCoreIQSourceProvider,
@@ -76,4 +99,5 @@ export {
 export type {
   BulkImportRequest,
   BulkImportResult,
+  NCoreIQSourceProviderOptions,
 } from './NCoreIQSourceProvider.js';

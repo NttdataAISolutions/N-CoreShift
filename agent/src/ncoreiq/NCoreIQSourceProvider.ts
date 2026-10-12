@@ -35,6 +35,7 @@ import type {
   IngestionJobInput,
 } from '../source/types.js';
 import { NCoreIQClient } from './NCoreIQClient.js';
+import { NCoreIQTokenAcquisitionError } from './NCoreIQTokenProvider.js';
 import type {
   NCoreIQClientConfig,
   NCoreIQConnectionTestResult,
@@ -181,6 +182,23 @@ export interface BulkImportResult {
   errors: string[];
 }
 
+// ── NCoreIQSourceProvider options ─────────────────────────────────────────
+
+export interface NCoreIQSourceProviderOptions {
+  /**
+   * Authentication mode.
+   * 'xsuaa'    → tokenProvider MUST be set in config. Fails closed if missing.
+   * 'disabled' → No token sent. Only allowed when isProduction=false.
+   */
+  authMode?: 'xsuaa' | 'disabled';
+  /**
+   * Whether this is a production runtime (NODE_ENV=production).
+   * When true, authMode='disabled' is rejected at construction time.
+   * Defaults to false for backward compatibility with existing tests.
+   */
+  isProduction?: boolean;
+}
+
 // ── NCoreIQSourceProvider ─────────────────────────────────────────────────
 
 export class NCoreIQSourceProvider implements CodeSourceProviderContract {
@@ -195,7 +213,29 @@ export class NCoreIQSourceProvider implements CodeSourceProviderContract {
     store?: InMemoryNCoreIQEvidenceStore,
     audit?: AuditService,
     jobService?: BackgroundJobService,
+    options?: NCoreIQSourceProviderOptions,
   ) {
+    const authMode = options?.authMode ?? 'disabled';
+    const isProduction = options?.isProduction ?? false;
+
+    // Production MUST NOT use disabled auth mode
+    if (isProduction && authMode === 'disabled') {
+      throw new NCoreIQTokenAcquisitionError(
+        'BINDING_MISSING',
+        'NCoreIQSourceProvider: NCOREIQ_AUTH_MODE=disabled is not permitted in production. ' +
+          'Set NCOREIQ_AUTH_MODE=xsuaa and provide a valid XSUAA service binding.',
+      );
+    }
+
+    // xsuaa mode requires a tokenProvider in the client config — fail CLOSED
+    if (authMode === 'xsuaa' && !config.tokenProvider) {
+      throw new NCoreIQTokenAcquisitionError(
+        'BINDING_MISSING',
+        'NCoreIQSourceProvider: authMode=xsuaa but no tokenProvider was supplied in config. ' +
+          'Use createNCoreIQTokenProvider() to build a provider from VCAP_SERVICES binding.',
+      );
+    }
+
     this._client = new NCoreIQClient(config);
     this._store = store ?? new InMemoryNCoreIQEvidenceStore();
     this._audit = audit;

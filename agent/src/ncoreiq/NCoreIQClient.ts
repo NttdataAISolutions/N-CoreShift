@@ -9,15 +9,15 @@
  * Responsibilities:
  *  - base URL construction
  *  - endpoint path building (centralised — not duplicated elsewhere)
- *  - Authorization header injection (when bearerToken is configured)
+ *  - Authorization header injection via tokenProvider (XSUAA) or bearerToken (tests)
  *  - timeout via AbortController
  *  - upstream error normalisation into NCoreIQApiError
  *  - secret-safe logging (Authorization headers are NEVER logged)
  *
- * Authentication note:
- *  SERVICE_TO_SERVICE_AUTH: DEFERRED UNTIL N-CORESHIFT BTP/XSUAA
- *  APPLICATION IDENTITY IS ESTABLISHED.
- *  bearerToken is accepted in config for when that work is complete.
+ * Authentication:
+ *  NCOREIQ_AUTH_MODE=xsuaa   → tokenProvider acquires client_credentials JWT dynamically.
+ *  NCOREIQ_AUTH_MODE=disabled → No Authorization header sent (local dev only).
+ *  bearerToken config field   → Backward-compat for existing tests only.
  */
 
 import {
@@ -46,6 +46,7 @@ import {
   JobStatusResponse,
   JobResultResponse,
 } from './types.js';
+import type { NCoreIQTokenProvider } from './NCoreIQTokenProvider.js';
 
 // ── API path constants (Contract Section 7 — authoritative) ──────────────
 // Do NOT duplicate these strings anywhere else in the codebase.
@@ -87,8 +88,10 @@ type FetchLike = (url: string, init?: Record<string, unknown>) => Promise<{
 export class NCoreIQClient {
   private readonly _baseUrl: string;
   private readonly _timeoutMs: number;
-  // bearerToken is held only as an opaque credential — never logged.
+  // Static bearerToken — backward compat for tests. Never logged.
   private readonly _bearerToken: string | undefined;
+  // Dynamic token provider (XSUAA client_credentials). Takes precedence over bearerToken.
+  private readonly _tokenProvider: NCoreIQTokenProvider | undefined;
   private readonly _fetchFn: FetchLike;
 
   constructor(config: NCoreIQClientConfig) {
@@ -99,6 +102,7 @@ export class NCoreIQClient {
     this._baseUrl = config.baseUrl.replace(/\/+$/, '');
     this._timeoutMs = config.timeoutMs ?? DEFAULT_TIMEOUT_MS;
     this._bearerToken = config.bearerToken;
+    this._tokenProvider = config.tokenProvider;
     // Use injected fetch (tests) or globalThis.fetch (production, Node 18+)
     this._fetchFn = (config.fetchFn as FetchLike | undefined) ?? (globalThis.fetch as unknown as FetchLike);
   }
@@ -263,10 +267,11 @@ export class NCoreIQClient {
 
   /** Returns raw artifact bytes. Caller is responsible for ZIP extraction. */
   async downloadArtifact(jobId: string): Promise<Uint8Array> {
+    const bearer = await this._acquireBearer();
     const url = this._url(NCOREIQ_PATHS.JOB_ARTIFACT(jobId));
     const response = await this._fetchWithTimeout(url, {
       method: 'GET',
-      headers: this._headers(),
+      headers: this._buildHeaders(bearer),
     });
     await this._assertSuccess(response, url);
     const buffer = await response.arrayBuffer();
@@ -283,18 +288,33 @@ export class NCoreIQClient {
   }
 
   /**
+   * Acquire the current bearer token from the token provider (dynamic) or
+   * fall back to the static bearerToken (backward compat for tests).
+   * Returns undefined when neither is configured (unauthenticated/disabled mode).
+   * Token value is NEVER logged.
+   */
+  private async _acquireBearer(): Promise<string | undefined> {
+    if (this._tokenProvider) {
+      const token = await this._tokenProvider.getToken();
+      // Empty string from DisabledModeTokenProvider means no auth header
+      return token || undefined;
+    }
+    return this._bearerToken;
+  }
+
+  /**
    * Returns request headers.
-   * Authorization header is injected when bearerToken is present but is
+   * Authorization header is injected when bearer is present but is
    * NEVER logged — it is only passed to the outgoing request.
    */
-  private _headers(extra?: Record<string, string>): Record<string, string> {
+  private _buildHeaders(bearer?: string, extra?: Record<string, string>): Record<string, string> {
     const h: Record<string, string> = {
       'Content-Type': 'application/json',
       Accept: 'application/json',
     };
-    if (this._bearerToken) {
+    if (bearer) {
       // Token is passed to the request but never written to any log sink.
-      h['Authorization'] = `Bearer ${this._bearerToken}`;
+      h['Authorization'] = `Bearer ${bearer}`;
     }
     if (extra) {
       Object.assign(h, extra);
@@ -303,10 +323,11 @@ export class NCoreIQClient {
   }
 
   private async _get<T>(path: string, params?: Record<string, string>): Promise<T> {
+    const bearer = await this._acquireBearer();
     const url = this._url(path, params);
     const response = await this._fetchWithTimeout(url, {
       method: 'GET',
-      headers: this._headers(),
+      headers: this._buildHeaders(bearer),
     });
     await this._assertSuccess(response, url);
     return this._parseJson<T>(response, url);
@@ -317,10 +338,11 @@ export class NCoreIQClient {
     body: unknown,
     extraHeaders?: Record<string, string>,
   ): Promise<T> {
+    const bearer = await this._acquireBearer();
     const url = this._url(path);
     const response = await this._fetchWithTimeout(url, {
       method: 'POST',
-      headers: this._headers(extraHeaders),
+      headers: this._buildHeaders(bearer, extraHeaders),
       body: JSON.stringify(body),
     });
     await this._assertSuccess(response, url);
@@ -330,7 +352,13 @@ export class NCoreIQClient {
   private async _fetchWithTimeout(
     url: string,
     init: Record<string, unknown>,
-  ): Promise<{ ok: boolean; status: number; headers: { get: (name: string) => string | null }; text: () => Promise<string>; arrayBuffer: () => Promise<ArrayBuffer> }> {
+  ): Promise<{
+    ok: boolean;
+    status: number;
+    headers: { get: (name: string) => string | null };
+    text: () => Promise<string>;
+    arrayBuffer: () => Promise<ArrayBuffer>;
+  }> {
     // For injected fetchFn (tests), skip AbortController — mock handles timing
     if (this._fetchFn !== (globalThis.fetch as unknown as FetchLike)) {
       try {
@@ -361,7 +389,15 @@ export class NCoreIQClient {
    * Asserts the response is 2xx.
    * Normalises upstream error bodies without exposing stack traces or credentials.
    */
-  private async _assertSuccess(response: { ok: boolean; status: number; headers: { get: (name: string) => string | null }; text: () => Promise<string> }, _url: string): Promise<void> {
+  private async _assertSuccess(
+    response: {
+      ok: boolean;
+      status: number;
+      headers: { get: (name: string) => string | null };
+      text: () => Promise<string>;
+    },
+    _url: string,
+  ): Promise<void> {
     if (response.ok) return;
 
     const status = response.status;
@@ -370,7 +406,6 @@ export class NCoreIQClient {
     let requestId: string | undefined;
     let correlationId: string | undefined;
 
-    // Safe correlation header extraction
     requestId = response.headers.get('X-Request-ID') ?? undefined;
     correlationId = response.headers.get('X-Correlation-ID') ?? undefined;
 
@@ -396,11 +431,14 @@ export class NCoreIQClient {
     throw new NCoreIQApiError(status, errorCode, message, requestId, correlationId);
   }
 
-  private async _parseJson<T>(response: { text: () => Promise<string> }, url: string): Promise<T> {
+  private async _parseJson<T>(
+    response: { text: () => Promise<string> },
+    url: string,
+  ): Promise<T> {
     try {
       const text = await response.text();
       return JSON.parse(text) as T;
-    } catch (err) {
+    } catch {
       throw new NCoreIQApiError(
         NCOREIQ_HTTP.INTERNAL,
         'MALFORMED_RESPONSE',

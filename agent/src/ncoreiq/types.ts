@@ -29,11 +29,17 @@ export interface NCoreIQClientConfig {
   /** No trailing slash. Set via NCOREIQ_BASE_URL env var. */
   baseUrl: string;
   /**
-   * Bearer JWT for XSUAA (Section 3).
-   * SERVICE_TO_SERVICE_AUTH: DEFERRED UNTIL N-CORESHIFT BTP/XSUAA
-   * APPLICATION IDENTITY IS ESTABLISHED.
+   * Static bearer token — kept for backward compatibility in tests.
+   * In production use tokenProvider instead.
+   * @deprecated prefer tokenProvider
    */
   bearerToken?: string;
+  /**
+   * Dynamic token provider (XSUAA client_credentials).
+   * When set, takes precedence over bearerToken.
+   * Required when authMode='xsuaa'.
+   */
+  tokenProvider?: import('./NCoreIQTokenProvider.js').NCoreIQTokenProvider;
   /** Request timeout ms. Default 30 000. */
   timeoutMs?: number;
   /**

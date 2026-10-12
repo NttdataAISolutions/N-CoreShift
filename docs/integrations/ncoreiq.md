@@ -1,10 +1,10 @@
 # N-CoreIQ Integration — N-CoreShift
 
-**Document version:** 1.0  
+**Document version:** 2.0
 **Contract version:** N-CoreIQ External Consumer Contract v1  
 **Branch:** ncoreiq-integration  
-**Date:** 2026-10-11  
-**Status:** Integration Foundation B — Implementation complete, awaiting BTP/XSUAA application identity
+**Date:** 2026-10-12
+**Status:** Integration Foundation C — BTP Service-to-Service Authentication implemented, awaiting BTP deployment and certification
 
 ---
 
@@ -15,11 +15,14 @@ SAP ECC / SAP S/4HANA
         |
         v
     N-CoreIQ          ← Technical Repository Evidence Provider
+        |                 (BTP CF, XSUAA protected backend)
+        | REST API  /api/v1/  (direct backend — NOT AppRouter)
         |
-        | REST API  /api/v1/
-        v
+        ^
+        | Authorization: Bearer <XSUAA client_credentials JWT>
+        |
     N-CoreShift       ← Clean Core Modernization Decision Engine
-        |
+        |                 (NCoreIQTokenProvider → XSUAA → JWT)
         +--> Evidence Snapshot
         +--> Functional Intent
         +--> Fit-to-Standard
@@ -37,6 +40,8 @@ SAP ECC / SAP S/4HANA
 | Complete source retrieval (no hidden line cap) | **N-CoreIQ** |
 | Dependency extraction, traversal, reverse analysis | **N-CoreIQ** |
 | Bulk extraction jobs and artifacts | **N-CoreIQ** |
+| XSUAA JWT validation (RS256, issuer, audience, scope) | **N-CoreIQ** |
+| Machine-to-machine token acquisition | **N-CoreShift** |
 | Functional intent interpretation | **N-CoreShift** |
 | Fit-to-Standard analysis | **N-CoreShift** |
 | Clean Core decisioning (RETIRE/REPLACE/REFACTOR/REPLATFORM/REVIEW) | **N-CoreShift** |
@@ -47,385 +52,436 @@ SAP ECC / SAP S/4HANA
 
 ---
 
-## Authentication Status
+## Machine-to-Machine Authentication Architecture (Foundation C)
+
+### Authentication Model
+
+N-CoreShift uses **OAuth2 client_credentials grant** (machine-to-machine) to authenticate to N-CoreIQ. This is distinct from user authentication (interactive JWT forwarding).
 
 ```
-SERVICE_TO_SERVICE_AUTH: DEFERRED UNTIL N-CORESHIFT BTP/XSUAA APPLICATION IDENTITY IS ESTABLISHED
+N-CoreShift XSUAA binding (VCAP_SERVICES / ncoreshift-uaa)
+        |
+        | POST /oauth/token
+        | grant_type=client_credentials
+        | Authorization: Basic base64(clientId:clientSecret)
+        v
+    SAP XSUAA token endpoint
+        |
+        | JWT containing NCoreIQ authority scopes
+        | aud: [ncoreiq-<org>-<space>]
+        | scope: ncoreiq-<org>-<space>.NCoreIQ.Viewer ncoreiq-<org>-<space>.NCoreIQ.Analyst
+        v
+    NCoreIQTokenProvider (server-side cache)
+        |
+        | Authorization: Bearer <JWT>
+        v
+    N-CoreIQ backend (XSUAA-protected FastAPI)
+        |   JWT validated: RS256 signature, issuer, audience, scopes
+        v
+    SAP ECC / S/4HANA
 ```
 
-Current state:
-- `NCoreIQClient` accepts an optional `bearerToken` in configuration
-- When N-CoreIQ runs with `AUTH_MODE=disabled` (local/dev), no token is required
-- BTP production requires a valid XSUAA Bearer JWT obtained via client_credentials flow
-- The N-CoreShift BTP/XSUAA application identity has not yet been established
-- Full service-to-service trust configuration (xs-security.json, role collection assignment) is deferred
+### Critical Separation
 
-See [N-CoreIQ Consumer Contract Section 11](../../C:/N-CoreIQ/docs/integration/ncoreiq-consumer-contract-v1.md#11-service-to-service-authentication-readiness) for the complete requirements.
+| Concern | Mechanism | Code Location |
+|---|---|---|
+| **User authentication** | Interactive browser JWT, AppRouter, XSUAA login | `app/src/auth/`, browser only |
+| **Machine authentication** | Server-side `client_credentials`, never browser | `agent/src/ncoreiq/NCoreIQTokenProvider.ts` |
+
+**The machine-to-machine JWT is NEVER forwarded to React / the browser.** It is acquired server-side, cached server-side, and only used for backend-to-backend N-CoreIQ calls.
+
+---
+
+## XSUAA Authority Grant Model
+
+### N-CoreIQ (Granting / Resource Application)
+
+`C:\N-CoreIQ\deployment\btp\xs-security.json` — grants Viewer and Analyst scopes to N-CoreShift:
+
+```json
+{
+  "xsappname": "ncoreiq",
+  "scopes": [
+    {
+      "name": "$XSAPPNAME.NCoreIQ.Viewer",
+      "grant-as-authority-to-apps": ["$XSAPPNAME(application,ncoreshift)"]
+    },
+    {
+      "name": "$XSAPPNAME.NCoreIQ.Analyst",
+      "grant-as-authority-to-apps": ["$XSAPPNAME(application,ncoreshift)"]
+    }
+  ]
+}
+```
+
+### N-CoreShift (Requesting Application)
+
+`xs-security.json` — declares which N-CoreIQ authorities it claims:
+
+```json
+{
+  "xsappname": "ncoreshift",
+  "authorities": [
+    "$XSAPPNAME(application,ncoreiq).NCoreIQ.Viewer",
+    "$XSAPPNAME(application,ncoreiq).NCoreIQ.Analyst"
+  ]
+}
+```
+
+### How `$XSAPPNAME(application,...)` Resolves
+
+XSUAA resolves `$XSAPPNAME(application,ncoreshift)` to the runtime xsappname of the N-CoreShift XSUAA service instance at deployment time (e.g. `ncoreshift-myorg-dev`). This avoids hard-coding org/space-specific names in the security descriptor.
+
+---
+
+## Minimum Privilege Scope Matrix
+
+### N-CoreShift Required Scopes
+
+N-CoreShift needs exactly **NCoreIQ.Analyst** (which includes NCoreIQ.Viewer by inheritance).
+N-CoreShift does **NOT** need NCoreIQ.Operator or NCoreIQ.Admin.
+
+| Operation | REST Endpoint | Required Scope | Required by N-CoreShift |
+|---|---|---|---|
+| SAP/system ping | `GET /api/v1/sap/ping` | NCoreIQ.Viewer | **YES** |
+| Package discovery | `GET /api/v1/repository/packages/{pkg}` | NCoreIQ.Viewer | **YES** |
+| Repository search | `POST /api/v1/repository/search` | NCoreIQ.Viewer | **YES** |
+| Object metadata | `GET /api/v1/repository/objects/{type}/{name}/metadata` | NCoreIQ.Viewer | **YES** |
+| Complete source | `GET /api/v1/repository/objects/{type}/{name}/source` | NCoreIQ.Viewer | **YES** |
+| Direct dependencies | `GET /api/v1/repository/objects/{type}/{name}/dependencies` | NCoreIQ.Viewer | **YES** |
+| Dependency traversal | `POST /api/v1/repository/dependencies/traverse` | **NCoreIQ.Analyst** | **YES** |
+| Reverse lookup | `POST /api/v1/repository/dependencies/reverse` | **NCoreIQ.Analyst** | **YES** |
+| Impact analysis | `POST /api/v1/repository/dependencies/impact` | **NCoreIQ.Analyst** | **YES** |
+| Job creation | `POST /api/v1/repository/jobs` | **NCoreIQ.Analyst** | **YES** |
+| Job status | `GET /api/v1/repository/jobs/{id}` | **NCoreIQ.Analyst** | **YES** |
+| Job result | `GET /api/v1/repository/jobs/{id}/result` | **NCoreIQ.Analyst** | **YES** |
+| Artifact download | `GET /api/v1/repository/jobs/{id}/artifact` | **NCoreIQ.Analyst** | **YES** |
+| Cancel job | `POST /api/v1/repository/jobs/{id}/cancel` | NCoreIQ.Operator | NO |
+| Retry job | `POST /api/v1/repository/jobs/{id}/retry` | NCoreIQ.Operator | NO |
+| Diagnostics | `GET /api/v1/admin/diagnostics` | NCoreIQ.Admin | NO |
+
+### Least-Privilege Rationale
+
+- NCoreIQ.Analyst inherits NCoreIQ.Viewer by N-CoreIQ's scope inheritance rule
+- N-CoreShift does not cancel or retry jobs — it creates and polls only
+- N-CoreShift has no administrative need — no diagnostics or config access
+- NCoreIQ.Admin is never granted to N-CoreShift
+
+---
+
+## NCoreIQTokenProvider
+
+### Interface
+
+```typescript
+// agent/src/ncoreiq/NCoreIQTokenProvider.ts
+export interface NCoreIQTokenProvider {
+  getToken(): Promise<string>;
+}
+```
+
+### Production Implementation
+
+```typescript
+import {
+  createNCoreIQTokenProvider,
+  XSUAAClientCredentialsTokenProvider,
+} from './ncoreiq/NCoreIQTokenProvider.js';
+import { getConfig, isProduction } from '../config/environment.js';
+
+// Create from VCAP_SERVICES binding (server startup)
+const tokenProvider = createNCoreIQTokenProvider(
+  getConfig().xsuaa,           // from VCAP_SERVICES / NCS_XSUAA_* env vars
+  getConfig().ncoreiq!.authMode, // 'xsuaa' in production
+  isProduction(),              // true → fails closed if binding missing
+);
+
+const sourceProvider = new NCoreIQSourceProvider(
+  {
+    baseUrl: getConfig().ncoreiq!.baseUrl,
+    tokenProvider,                          // dynamic JWT acquisition
+    timeoutMs: getConfig().ncoreiq!.timeoutMs,
+  },
+  store, audit, jobs,
+  { authMode: 'xsuaa', isProduction: isProduction() },
+);
+```
+
+### Token Caching and Refresh
+
+- Tokens are cached in memory until `(expires_in - 30s)` from acquisition time
+- `expires_in` default: 43,200 seconds (12 hours, from XSUAA config)
+- On cache miss: automatic re-acquisition
+- `invalidateCache()` forces immediate re-acquisition on next call
+- Concurrent requests to `getToken()` in a single Node event loop are safe (single-threaded)
+
+### Security Invariants
+
+| Invariant | Enforcement |
+|---|---|
+| Token never logged | No log calls in `NCoreIQTokenProvider.ts` |
+| Token never in error messages | `NCoreIQTokenAcquisitionError` never includes token value |
+| ClientSecret never logged | Not logged even as `[REDACTED]` |
+| ClientSecret never in error messages | Errors use reason codes only |
+| Token never returned to browser/React | `NCoreIQSourceProvider.testConnection()` result has no token field |
+| Production fails closed | `createNCoreIQTokenProvider()` throws if binding missing |
+
+### Local Development Mode
+
+```typescript
+// Local dev: NCOREIQ_AUTH_MODE=disabled (N-CoreIQ also runs AUTH_MODE=disabled)
+const tokenProvider = createNCoreIQTokenProvider(null, 'disabled', false);
+// Returns DisabledModeTokenProvider → getToken() returns '' → no Authorization header
+```
+
+**`disabled` is ONLY permitted when `isProduction=false`.** Production always fails closed.
+
+---
+
+## Fail-Closed Behavior
+
+| Failure Mode | Behavior |
+|---|---|
+| XSUAA binding absent, `authMode=xsuaa` | `createNCoreIQTokenProvider()` throws `BINDING_MISSING` |
+| `authMode=disabled`, `isProduction=true` | `NCoreIQSourceProvider` constructor throws `BINDING_MISSING` |
+| `authMode=xsuaa`, no `tokenProvider` in config | `NCoreIQSourceProvider` constructor throws `BINDING_MISSING` |
+| Empty `clientId` | `XSUAAClientCredentialsTokenProvider` constructor throws `CREDENTIALS_MISSING` |
+| Empty `clientSecret` | `XSUAAClientCredentialsTokenProvider` constructor throws `CREDENTIALS_MISSING` |
+| Empty `tokenUrl` | Constructor throws `BINDING_MISSING` |
+| Token endpoint returns HTTP 4xx/5xx | `getToken()` throws `TOKEN_ENDPOINT_ERROR` |
+| Token endpoint unreachable | `getToken()` throws `TOKEN_ENDPOINT_UNAVAILABLE` |
+| Token endpoint timeout (15s) | `getToken()` throws `TOKEN_ENDPOINT_TIMEOUT` |
+| N-CoreIQ returns 401 | `NCoreIQApiError` (httpStatus=401, errorCode=UNAUTHORIZED) |
+| N-CoreIQ returns 403 | `NCoreIQApiError` (httpStatus=403, errorCode=FORBIDDEN) |
+| `disabled` → `xsuaa` downgrade in production | BLOCKED — constructor throws |
+
+**Never silently downgraded.** Production never falls back to unauthenticated mode.
+
+---
+
+## N-CoreIQ JWT Validation (Unchanged)
+
+N-CoreIQ's existing JWT validation is preserved and **not weakened**:
+
+- RS256 signature verified against XSUAA JWKS (`/token_keys`)
+- Issuer validated: `https://<subaccount>.authentication.<region>.hana.ondemand.com/oauth/token`
+- Audience validated: accepted values = `[ncoreiq-<org>-<space>, bound_clientid]`
+- Expiry enforced
+- Scope extracted and mapped to `AuthenticatedPrincipal`
+- JWKS cached (5-minute TTL)
+
+For a client_credentials JWT issued to N-CoreShift, the `aud` claim will contain the N-CoreIQ runtime xsappname (`ncoreiq-<org>-<space>`), which N-CoreIQ's middleware already accepts.
+
+No changes to N-CoreIQ's `app/auth/middleware.py` are required for the standard XSUAA authority grant flow.
+
+---
+
+## Direct Backend URL
+
+N-CoreShift calls the **protected N-CoreIQ backend directly**, not via the AppRouter:
+
+| Environment | URL |
+|---|---|
+| BTP Production | `https://ncoreiq.cfapps.us10.hana.ondemand.com` |
+| Local development | `http://localhost:8000` |
+
+The URL is configured via `NCOREIQ_BASE_URL` — never hard-coded in application source.
+
+**Do NOT use the AppRouter URL** (`https://ncoreiq-ui.cfapps.us10.hana.ondemand.com`). The AppRouter is for browser traffic only. Backend-to-backend integration uses the protected backend directly.
+
+### Destination Service Decision
+
+N-CoreShift does **not** use BTP Destination Service for the N-CoreShift → N-CoreIQ connection. Direct HTTPS via `NCOREIQ_BASE_URL` is the established pattern in N-CoreShift (consistent with AI Core, Object Store). Destination Service would add unnecessary indirection.
+
+Note: This is separate from N-CoreIQ's own use of Destination Service for the N-CoreIQ → SAP connection (`NC1_ODATA`). These are different connections.
 
 ---
 
 ## Configuration
 
-All configuration is via environment variables. No production URLs, credentials, or OAuth secrets are hard-coded.
-
 ### Environment Variables
 
 | Variable | Required | Description |
 |---|---|---|
-| `NCOREIQ_BASE_URL` | Required | Direct backend URL, e.g. `http://localhost:8000` or `https://ncoreiq.cfapps.us10.hana.ondemand.com`. **Never** use the AppRouter URL. |
-| `NCOREIQ_AUTH_MODE` | Optional | `disabled` (local/dev) or `xsuaa` (BTP production). Default: `disabled`. |
-| `NCOREIQ_TIMEOUT_MS` | Optional | Request timeout in milliseconds. Default: `30000`. |
+| `NCOREIQ_BASE_URL` | Required | Direct backend URL. Never use AppRouter URL. |
+| `NCOREIQ_AUTH_MODE` | Optional | `disabled` (local) or `xsuaa` (BTP production). Default: `disabled`. |
+| `NCOREIQ_TIMEOUT_MS` | Optional | Request timeout ms. Default: `30000`. |
 
-### .env.example
+### XSUAA Binding (BTP Production)
 
-```
-NCOREIQ_BASE_URL=
-NCOREIQ_AUTH_MODE=disabled
-# NCOREIQ_TIMEOUT_MS=30000
-```
+The token provider reads from `NCS_XSUAA_*` environment variables or VCAP_SERVICES (automatically populated when `ncoreshift-uaa` service is bound):
 
-### Server Configuration
+| Source | Variable / Binding field | Used for |
+|---|---|---|
+| VCAP_SERVICES | `xsuaa[].credentials.clientid` | OAuth2 client ID |
+| VCAP_SERVICES | `xsuaa[].credentials.clientsecret` | OAuth2 client secret |
+| VCAP_SERVICES | `xsuaa[].credentials.url` | XSUAA base URL → token endpoint |
+| env var fallback | `NCS_XSUAA_CLIENT_ID` | Local dev / CI override |
+| env var fallback | `NCS_XSUAA_CLIENT_SECRET` | Local dev / CI override |
+| env var fallback | `NCS_XSUAA_URL` | Local dev / CI override |
 
-`NCoreIQIntegrationConfig` is added to `NCSEnvironmentConfig` in `srv/src/config/environment.ts`. When `NCOREIQ_BASE_URL` is not set, `config.ncoreiq` is `null` and the connected source mode is unavailable.
-
----
-
-## Implementation Files
-
-| File | Description |
-|---|---|
-| `agent/src/ncoreiq/types.ts` | N-CoreIQ DTO types (from contract) + N-CoreShift domain mapping types |
-| `agent/src/ncoreiq/NCoreIQClient.ts` | Typed HTTP client — all contract endpoints, secret-safe |
-| `agent/src/ncoreiq/NCoreIQSourceProvider.ts` | CodeSourceProvider implementation + evidence store |
-| `agent/src/ncoreiq/index.ts` | Public barrel exports |
-| `agent/src/__tests__/ncoreiq.test.ts` | Integration tests A–W (37 tests) |
-| `app/src/components/NCoreIQConnectModal.tsx` | UI: Connected SAP via N-CoreIQ flow |
-| `srv/src/config/environment.ts` | `NCoreIQIntegrationConfig` + `buildNCoreIQConfig()` |
+**No secrets are stored in `.env`, source files, or test fixtures.**
 
 ---
 
-## NCoreIQClient
+## BTP Binding Requirements
 
-`NCoreIQClient` is the centralized HTTP client for the N-CoreIQ REST API v1.
+The following must be true at deployment time for service-to-service auth to work:
 
-### Endpoint Constants
+1. **N-CoreShift XSUAA service bound** — `ncoreshift-uaa` service instance bound to `ncoreshift-srv` app. Credentials in `VCAP_SERVICES`.
 
-All API paths are defined once in `NCOREIQ_PATHS` in `NCoreIQClient.ts`. No paths are duplicated elsewhere in the codebase.
+2. **N-CoreIQ xs-security.json deployed** — The updated `deployment/btp/xs-security.json` (with `grant-as-authority-to-apps`) must be deployed to N-CoreIQ's XSUAA service instance:
+   ```
+   # In N-CoreIQ project:
+   cf update-service ncoreiq-xsuaa -c deployment/btp/xs-security.json
+   # OR redeploy:
+   mbt build && cf deploy mta_archives/ncoreiq_*.mtar
+   ```
+
+3. **N-CoreShift xs-security.json deployed** — The updated `xs-security.json` (with `authorities`) must be deployed to N-CoreShift's XSUAA service instance:
+   ```
+   # In N-CoreShift project:
+   cf update-service ncoreshift-uaa -c xs-security.json
+   # OR redeploy:
+   mbt build && cf deploy mta_archives/ncoreshift_*.mtar
+   ```
+
+4. **VCAP_SERVICES populated** — Happens automatically when service is bound to the app in CF.
+
+5. **NCOREIQ_BASE_URL configured** — Set on the N-CoreShift backend app:
+   ```
+   cf set-env ncoreshift-srv NCOREIQ_BASE_URL https://ncoreiq.cfapps.us10.hana.ondemand.com
+   cf set-env ncoreshift-srv NCOREIQ_AUTH_MODE xsuaa
+   cf restage ncoreshift-srv
+   ```
+
+### Values Known Now vs. Values Discovered During Deployment
+
+| Value | Known now | Discovery command |
+|---|---|---|
+| N-CoreShift logical `xsappname` | `ncoreshift` | In `xs-security.json` |
+| N-CoreIQ logical `xsappname` | `ncoreiq` | In N-CoreIQ `xs-security.json` |
+| N-CoreShift runtime xsappname | `ncoreshift-<org>-<space>` | `cf service ncoreshift-uaa --guid` |
+| N-CoreIQ runtime xsappname | `ncoreiq-<org>-<space>` | `cf service ncoreiq-xsuaa --guid` |
+| N-CoreShift `clientid` | NOT known | `cf service-key ncoreshift-uaa ncoreshift-sk` |
+| N-CoreShift `clientsecret` | NOT known | `cf service-key ncoreshift-uaa ncoreshift-sk` |
+| XSUAA token endpoint URL | NOT known | From service key `.url` + `/oauth/token` |
+| N-CoreIQ backend URL | `https://ncoreiq.cfapps.us10.hana.ondemand.com` | `cf app ncoreiq-backend` |
+
+---
+
+## Deployment and Certification Sequence
+
+After review, execute in this order:
+
+```bash
+# 1. Deploy N-CoreIQ with updated xs-security.json (grant-as-authority-to-apps)
+cd C:\N-CoreIQ
+mbt build
+cf deploy mta_archives/ncoreiq_1.0.0.mtar
+
+# 2. Deploy N-CoreShift with updated xs-security.json (authorities)
+cd C:\AI_Automation\N-CoreShift\N-CoreShift
+mbt build
+cf deploy mta_archives/ncoreshift_1.0.0.mtar
+
+# 3. Set N-CoreIQ URL and auth mode on N-CoreShift backend
+cf set-env ncoreshift-srv NCOREIQ_BASE_URL https://ncoreiq.cfapps.us10.hana.ondemand.com
+cf set-env ncoreshift-srv NCOREIQ_AUTH_MODE xsuaa
+cf restage ncoreshift-srv
+
+# 4. Discover the N-CoreShift service key (DO NOT commit output)
+cf create-service-key ncoreshift-uaa ncoreshift-sk
+cf service-key ncoreshift-uaa ncoreshift-sk
+# → record clientid, clientsecret, url for verification only
+
+# 5. Manually test token acquisition
+# POST https://<xsuaa-url>/oauth/token
+# Authorization: Basic base64(<clientid>:<clientsecret>)
+# Body: grant_type=client_credentials
+# → Verify: access_token present, scope includes NCoreIQ.Viewer NCoreIQ.Analyst
+
+# 6. Verify N-CoreIQ accepts the token
+# GET https://ncoreiq.cfapps.us10.hana.ondemand.com/api/v1/sap/ping
+# Authorization: Bearer <token-from-step-5>
+# → Expect: HTTP 200, status=connected OR HTTP 503 (SAP unreachable, not auth failure)
+
+# 7. Verify N-CoreShift → N-CoreIQ integration via deployed app
+# GET https://ncoreshift-srv.cfapps.us10.hana.ondemand.com/api/ncoreiq/ping
+# Authorization: Bearer <ncoreshift-user-token>
+# → Expect: connected=true (or SAP connectivity error, not auth error)
+```
+
+---
+
+## Implementation Files (Foundation C)
+
+| File | Change | Description |
+|---|---|---|
+| `agent/src/ncoreiq/NCoreIQTokenProvider.ts` | **NEW** | XSUAA client_credentials token provider |
+| `agent/src/ncoreiq/types.ts` | Updated | Added `tokenProvider` to `NCoreIQClientConfig` |
+| `agent/src/ncoreiq/NCoreIQClient.ts` | Updated | Async `_acquireBearer()`, `_buildHeaders()`, tokenProvider support |
+| `agent/src/ncoreiq/NCoreIQSourceProvider.ts` | Updated | Production fail-closed guards, `NCoreIQSourceProviderOptions` |
+| `agent/src/ncoreiq/index.ts` | Updated | Export NCoreIQTokenProvider types + factory |
+| `agent/src/__tests__/ncoreiq-auth.test.ts` | **NEW** | Security tests A–P (16 scenarios) |
+| `agent/src/__tests__/ncoreiq-scope-contract.test.ts` | **NEW** | Scope contract tests (minimum privilege) |
+| `xs-security.json` | Updated | Added `authorities` for NCoreIQ.Viewer + NCoreIQ.Analyst |
+| `C:\N-CoreIQ\deployment\btp\xs-security.json` | Updated | Added `grant-as-authority-to-apps` to Viewer + Analyst |
+| `docs/integrations/ncoreiq.md` | Updated | This document |
+
+---
+
+## Test Coverage (Foundation C)
+
+| Test File | Tests | Coverage |
+|---|---|---|
+| `ncoreiq.test.ts` (existing) | 37 tests (A–W) | Client, provider, evidence, jobs, hashing |
+| `ncoreiq-auth.test.ts` | 16 scenarios (A–P) | Token acquisition, caching, fail-closed, 401/403, disabled mode, browser safety |
+| `ncoreiq-scope-contract.test.ts` | 20+ tests | Scope matrix, least privilege, path constants, inheritance |
+
+**All 525 agent tests pass.**
+
+---
+
+## NCoreIQClient (Updated)
+
+Authentication is now fully dynamic:
 
 ```typescript
-import { NCoreIQClient, NCOREIQ_PATHS } from './ncoreiq/NCoreIQClient.js';
-
+// Production (NCOREIQ_AUTH_MODE=xsuaa)
 const client = new NCoreIQClient({
-  baseUrl: 'http://localhost:8000',   // from NCOREIQ_BASE_URL
-  bearerToken: undefined,             // DEFERRED — see auth section
+  baseUrl: 'https://ncoreiq.cfapps.us10.hana.ondemand.com',
+  tokenProvider,  // XSUAAClientCredentialsTokenProvider — fetches+caches JWT
   timeoutMs: 30_000,
 });
-```
 
-### Endpoint Mapping (Contract Section 7)
-
-| Client Method | HTTP | Path |
-|---|---|---|
-| `ping()` | GET | `/api/v1/sap/ping` |
-| `listPackages(pkg, opts)` | GET | `/api/v1/repository/packages/{package}` |
-| `searchObjects(req)` | POST | `/api/v1/repository/search` |
-| `getMetadata(type, name)` | GET | `/api/v1/repository/objects/{type}/{name}/metadata` |
-| `getSource(type, name)` | GET | `/api/v1/repository/objects/{type}/{name}/source` |
-| `getSourceBounded(type, name, N)` | GET | `.../source?max_lines=N` |
-| `getDependencies(type, name)` | GET | `/api/v1/repository/objects/{type}/{name}/dependencies` |
-| `traverseDependencies(req)` | POST | `/api/v1/repository/dependencies/traverse` |
-| `findDependents(req)` | POST | `/api/v1/repository/dependencies/reverse` |
-| `analyzeImpact(req)` | POST | `/api/v1/repository/dependencies/impact` |
-| `createExtractionJob(req)` | POST | `/api/v1/repository/jobs` |
-| `getJobStatus(jobId)` | GET | `/api/v1/repository/jobs/{job_id}` |
-| `getJobResult(jobId)` | GET | `/api/v1/repository/jobs/{job_id}/result` |
-| `downloadArtifact(jobId)` | GET | `/api/v1/repository/jobs/{job_id}/artifact` |
-
-### Secret Safety
-
-- `Authorization` headers are injected into outgoing requests but **never** written to any log
-- Error messages from upstream are normalized — no stack traces, no credentials, no tokens are exposed
-- `NCoreIQApiError`, `NCoreIQTimeoutError`, `NCoreIQUnavailableError` carry safe error codes only
-
-### Test Injection
-
-`NCoreIQClientConfig.fetchFn` accepts an optional fetch implementation for unit testing. Production always uses `globalThis.fetch` (Node 18+).
-
----
-
-## NCoreIQSourceProvider
-
-`NCoreIQSourceProvider` implements `CodeSourceProviderContract` and adds N-CoreIQ-specific methods.
-
-### Provider Hierarchy
-
-```
-CodeSourceProvider (abstract)
-    |
-    +-- FileUploadSourceProvider
-    +-- NCoreIQSourceProvider        ← this implementation
-             |
-             +-- NCoreIQClient
-```
-
-### Connected Import Workflow
-
-```
-1. testConnection()
-   → GET /api/v1/sap/ping
-   → Returns: connected, systemId, client, sapRelease
-
-2. listPackages(tenantId, rootPackage, { include_subpackages: true })
-   → GET /api/v1/repository/packages/{package}
-   → Returns: package hierarchy for user selection
-
-3. previewObjects(tenantId, { packages: [...], include_subpackages: true })
-   → POST /api/v1/repository/search
-   → Returns: object count, types, names for scope selection
-
-4a. For individual objects:
-    importObject(tenantId, projectId, analysisId, type, name)
-    → Parallel: GET .../metadata  +  GET .../source  (NO max_lines)
-    → Stores: NCoreIQObjectEvidence in InMemoryNCoreIQEvidenceStore
-
-4b. For bulk packages:
-    startBulkImport({ tenantId, projectId, analysisId, packages, ... })
-    → POST /api/v1/repository/search (discover objects)
-    → POST /api/v1/repository/jobs  (source_max_lines=null = COMPLETE)
-    → Returns: NCoreIQImportJob with localJobId + upstreamJobId
-
-5. pollImportJob(localJobId)
-   → GET /api/v1/repository/jobs/{job_id}
-   → Maps SUCCEEDED → COMPLETED, FAILED → FAILED, etc.
-
-6. getEvidence(tenantId, projectId, analysisId)
-   → Returns latest evidence snapshots — scoped, isolated
-```
-
----
-
-## Complete Source Import
-
-**MANDATORY REQUIREMENT:** `getSource()` **never** sends `max_lines`. Persisted evidence is always complete.
-
-```typescript
-// CORRECT — complete source
-await client.getSource('PROG', 'ZREPORT_DEMO');
-// URL: GET /api/v1/repository/objects/PROG/ZREPORT_DEMO/source
-
-// CORRECT — bounded, for UI preview only
-await client.getSourceBounded('PROG', 'ZREPORT_DEMO', 500);
-// URL: GET .../source?max_lines=500  (preview display only — NOT for import)
-
-// NEVER sent by default:
-// max_lines=500  ← explicitly prohibited
-// max_lines=1000 ← explicitly prohibited
-// max_lines=N    ← any limit during import is prohibited
-```
-
-N-CoreIQ transparently follows SAP Gateway `__next` pagination links and returns a single merged response with all source lines.
-
-For bulk extraction jobs, `source_max_lines: null` is always sent — complete source per object.
-
----
-
-## Package Discovery
-
-```typescript
-const provider = new NCoreIQSourceProvider(config);
-
-// Test connection first
-const conn = await provider.testConnection();
-// conn.connected, conn.systemId, conn.client, conn.sapRelease
-
-// Browse package hierarchy
-const packages = await provider.listPackages(tenantId, 'ZNCOREIQ', {
-  include_subpackages: true,
-  max_depth: 20,
+// Local dev (NCOREIQ_AUTH_MODE=disabled)
+const client = new NCoreIQClient({
+  baseUrl: 'http://localhost:8000',
+  tokenProvider: new DisabledModeTokenProvider(),  // returns '' → no auth header
+  timeoutMs: 30_000,
 });
-// packages.packages[].package, .parent_package, .description, .depth
 
-// Preview objects in selected packages
-const preview = await provider.previewObjects(tenantId, {
-  packages: ['ZNCOREIQ', 'ZNCOREIQ_CORE'],
-  include_subpackages: true,
+// Tests (backward-compat — static token)
+const client = new NCoreIQClient({
+  baseUrl: 'http://localhost:8000',
+  bearerToken: 'test-token',  // static, tests only
+  fetchFn: mockFetch,
 });
-// preview.objects[].sap_object_type, .object_name, .package, .description
 ```
 
 ---
 
-## Evidence Snapshot Behavior
+## Remaining Items for BTP Service-to-Service Certification
 
-Every imported object produces an `NCoreIQObjectEvidence` record:
+After deployment of Foundation C:
 
-```typescript
-{
-  id: string;                 // N-CoreShift generated UUID
-  tenantId: string;           // Tenant isolation
-  projectId: string;          // Project isolation
-  analysisId: string;
-  provider: 'NCOREIQ';        // Fixed — always NCOREIQ
-  ncoreiqBaseUrl: string;     // Evidence provenance
-  contractVersion: 'v1';
-  systemId: string;           // SAP SID (e.g. NC1)
-  client: string;             // SAP client (e.g. 800)
-  sapPackage: string;
-  objectType: string;
-  objectName: string;
-  // ... SAP metadata fields
-  sourceText: string;         // COMPLETE source — never truncated
-  returnedLines: number;
-  sourceHash: string;         // SHA-256 hex
-  ncoreiqProvidedHash: boolean; // true if N-CoreIQ computed it
-  retrievedAt: string;        // ISO timestamp — N-CoreShift records this
-  version: number;            // 1 = initial, 2+ = refresh
-  isLatest: boolean;
-  refreshedFrom: string | null;
-}
-```
-
-### Source Hash (Section 8)
-
-The `sha256` field from N-CoreIQ is computed as:
-```
-SHA-256( all_component_lines.join("\n").encode("utf-8") )
-```
-
-- N-CoreShift stores the N-CoreIQ-provided hash when present (`ncoreiqProvidedHash=true`)
-- If N-CoreIQ does not provide a hash, N-CoreShift computes it locally using the same algorithm
-- This enables change detection between source evidence revisions
-
----
-
-## Refresh and Immutability
-
-Previously completed analysis evidence is **never** silently mutated:
-
-```typescript
-// Explicit refresh — creates version 2, marks version 1 as isLatest=false
-const v2 = await provider.refreshObject(tenantId, projectId, analysisId, 'PROG', 'ZREPORT_DEMO');
-// v2.version === 2
-// v2.refreshedFrom === v1.id
-// v1 remains stored with isLatest=false
-
-// getEvidence() returns only the latest version of each object
-const evidence = provider.getEvidence(tenantId, projectId, analysisId);
-```
-
----
-
-## Dependency Import
-
-Technical dependencies from N-CoreIQ are evidence — **not** Clean Core decisions:
-
-```typescript
-const records = await provider.importDependencies(tenantId, projectId, analysisId, 'PROG', 'ZREPORT_DEMO');
-// records[].relationshipType  (e.g. CALLS_FUNCTION)
-// records[].targetObjectName
-// records[].confidence       (EXACT / HIGH / MEDIUM / LOW)
-// records[].direction        = 'OUTBOUND'
-// records[].dynamic          (dynamic call — lower confidence)
-```
-
-A `CALLS_FUNCTION` dependency is technical evidence. Whether it constitutes a Clean Core violation is N-CoreShift's separate decision — not N-CoreIQ's.
-
----
-
-## Bulk Extraction Job Integration
-
-Large package imports use N-CoreIQ async extraction jobs (POST /api/v1/repository/jobs).
-
-```typescript
-// Start bulk import — never blocks a browser request
-const job = await provider.startBulkImport({
-  tenantId, projectId, analysisId,
-  packages: ['ZNCOREIQ'],
-  includeSubpackages: true,
-  requestedBy: 'consultant@example.com',
-});
-// job.localJobId   — local BackgroundJobService ID
-// job.upstreamJobId — N-CoreIQ job_id
-
-// Poll status (BackgroundJobService handles scheduling)
-const updated = await provider.pollImportJob(job.localJobId);
-// updated.localStatus: QUEUED | RUNNING | COMPLETED | PARTIAL | FAILED | CANCELLED
-// (N-CoreIQ SUCCEEDED maps to N-CoreShift COMPLETED)
-```
-
-The bulk job request always uses `source_max_lines: null` — complete source per object.
-
----
-
-## Tenant and Project Isolation
-
-All evidence is scoped by `tenantId` + `projectId`. The `InMemoryNCoreIQEvidenceStore` enforces this:
-
-- `getEvidence(tenantId, projectId, analysisId)` returns only records matching all three
-- Cross-tenant reads return empty — enforced server-side, not browser-side
-- Tests N and O verify isolation explicitly
-
----
-
-## Error Handling
-
-| Condition | Error Type | Provider Behavior |
-|---|---|---|
-| HTTP 401 | `NCoreIQApiError` (httpStatus=401) | `testConnection()` returns `connected=false` |
-| HTTP 403 | `NCoreIQApiError` (httpStatus=403) | Same — no credentials exposed |
-| HTTP 503 | `NCoreIQApiError` (errorCode=SAP_UNAVAILABLE) | `testConnection()` returns `connected=false` |
-| Timeout | `NCoreIQTimeoutError` | Error message: "timed out after Nms" |
-| DNS/network failure | `NCoreIQUnavailableError` | Error message: "N-CoreIQ is unavailable" |
-| Non-JSON response | `NCoreIQApiError` (MALFORMED_RESPONSE) | Upstream body not exposed |
-| Truncated source | `Error` | `importObject()` throws — complete source required |
-| Job not found | `Error` | `pollImportJob()` throws |
-
-**Never logged:** Authorization headers, bearer tokens, client secrets, SAP credentials.
-
----
-
-## Audit Integration
-
-`NCoreIQSourceProvider` calls `AuditService` (when injected) for security-safe events:
-
-| Event | Action recorded |
-|---|---|
-| Connection test | `NCOREIQ_CONNECTION_TEST` |
-| Package browse | `NCOREIQ_PACKAGE_BROWSE` |
-| Object preview | `NCOREIQ_PACKAGE_PREVIEW` |
-| Object import | `NCOREIQ_OBJECT_IMPORT` |
-| Bulk job started | `NCOREIQ_BULK_JOB_STARTED` |
-
-Audit records contain only identifiers and counts — **never** tokens, secrets, or source content.
-
----
-
-## UI — NCoreIQConnectModal
-
-`app/src/components/NCoreIQConnectModal.tsx` provides the "Connected SAP via N-CoreIQ" source ingestion flow:
-
-```
-Step 1: Connection
-  → Enter N-CoreIQ Base URL
-  → Test Connection (GET /api/ncoreiq/ping)
-  → Displays: SID, Client, SAP Release
-
-Step 2: Packages
-  → Enter root package name
-  → Browse (POST /api/ncoreiq/packages)
-  → Select packages for import
-
-Step 3: Preview
-  → Loads objects in selected packages (POST /api/ncoreiq/preview)
-  → Displays: object type, name, description (not source code)
-
-Step 4: Import
-  → Starts bulk extraction job (POST /api/ncoreiq/import)
-  → Polls status with progress display
-  → Shows COMPLETED / PARTIAL / FAILED result
-```
-
-The UI **never** displays tokens, secrets, passwords, or source code content.
+1. **Execute deployment sequence** (Section above)
+2. **Discover runtime xsappnames** to confirm `$XSAPPNAME(application,...)` resolved correctly
+3. **Manually verify token** contains correct audience and scope claims
+4. **Run integration smoke test** against deployed N-CoreShift → N-CoreIQ path
+5. **Verify N-CoreIQ JWT validation** accepts the client_credentials JWT from N-CoreShift
+6. If N-CoreIQ rejects the token (audience mismatch), set `AUTH__AUDIENCE` on N-CoreIQ to explicitly accept the N-CoreShift clientid
 
 ---
 
@@ -433,58 +489,29 @@ The UI **never** displays tokens, secrets, passwords, or source code content.
 
 All tests use `fetchFn` injection — no live N-CoreIQ or SAP connectivity required.
 
-```typescript
-import { NCoreIQClient } from '../ncoreiq/NCoreIQClient.js';
-import type { NCoreIQClientConfig } from '../ncoreiq/types.js';
-
-const mockFetch = (url: string) =>
-  Promise.resolve({
-    ok: true,
-    status: 200,
-    headers: { get: () => null },
-    text: () => Promise.resolve(JSON.stringify({ status: 'connected', system_id: 'NC1', ... })),
-    arrayBuffer: () => Promise.resolve(new ArrayBuffer(0)),
-  });
-
-const client = new NCoreIQClient({
-  baseUrl: 'http://localhost:8000',
-  fetchFn: mockFetch,
-} as NCoreIQClientConfig);
-```
-
 For local development with a real N-CoreIQ instance:
 1. Start N-CoreIQ with `AUTH_MODE=disabled`
 2. Set `NCOREIQ_BASE_URL=http://localhost:8000`
-3. Leave `NCOREIQ_AUTH_MODE=disabled`
+3. Set `NCOREIQ_AUTH_MODE=disabled`
+4. N-CoreIQ will accept requests without a JWT
+
+For local testing with XSUAA:
+1. Set `NCOREIQ_AUTH_MODE=xsuaa`
+2. Provide `NCS_XSUAA_CLIENT_ID`, `NCS_XSUAA_CLIENT_SECRET`, `NCS_XSUAA_URL` in `.env` (not committed)
+3. N-CoreIQ must run with `AUTH_MODE=xsuaa` and be reachable
 
 ---
 
-## BTP Deployment Work Still Required
+## What Is NOT Modified
 
-The following work is deferred until the N-CoreShift BTP/XSUAA application identity is established:
-
-1. **N-CoreShift XSUAA application registration** — obtain `xsappname` and `clientid`
-2. **Role collection assignment** — assign `NCoreIQ Analyst` role collection to N-CoreShift service instance in BTP subaccount
-3. **Token acquisition implementation** — implement client_credentials flow in `AuthProvider` or equivalent; inject `bearerToken` into `NCoreIQClientConfig`
-4. **N-CoreIQ `xs-security.json` update** — add `authorities` or `foreign-scope-references` for N-CoreShift (N-CoreIQ team action)
-5. **`AUTH__AUDIENCE` configuration** — N-CoreIQ may need to accept N-CoreShift `clientid` in JWT `aud` claim
-6. **BTP Destination Service** — optionally resolve N-CoreIQ base URL via Destination Service for production routing
-
-Until the above is complete, N-CoreShift cannot authenticate to N-CoreIQ in BTP production. Local development with `AUTH_MODE=disabled` is fully functional.
-
----
-
-## Contract Mismatches Discovered
-
-The original `agent/src/ncoreiq/types.ts` stub had incorrect field names throughout. All corrections documented at the top of that file. Key mismatches:
-
-| Location | Original stub | Contract (authoritative) |
-|---|---|---|
-| Package entry | `package_name`, `object_count`, `sub_packages` | `package`, `parent_package`, `depth` |
-| Search result object | `package_name`, no `friendly_type`/`author`/`match_reason` | `package`, `friendly_type`, `author`, `match_reason` |
-| Source response | Flat `lines[]` array | `components[]` array with `lines[]` nested |
-| Dependency relation | `from_type`/`from_name`/`to_type`/`relation_type` | `relation_id`/`source_object_type`/`relationship_type`/`confidence`/`evidence_source`/`line_no`/`dynamic` |
-| Dependencies response | `dependencies[]` | `relationships[]` |
-| Traversal/Reverse/Impact requests | Flat fields | Nested `root_object`/`target_object`/`object` with `SAPObjectRef` |
-
-These mismatches have been corrected. The authoritative contract remains `C:\N-CoreIQ\docs\integration\ncoreiq-consumer-contract-v1.md`.
+| Component | Status |
+|---|---|
+| N-CoreIQ `app/auth/middleware.py` | Unchanged — JWT validation preserved |
+| N-CoreIQ `app/auth/principal.py` | Unchanged — scope constants preserved |
+| N-CoreIQ SAP connectivity (`NC1_ODATA`) | Unchanged |
+| N-CoreIQ Destination Service | Unchanged |
+| N-CoreIQ Connectivity Service | Unchanged |
+| N-CoreIQ Cloud Connector configuration | Unchanged |
+| SAP Gateway / SAP ABAP | Unchanged |
+| N-CoreShift user role-collections | Unchanged — user auth unaffected |
+| N-CoreShift interactive XSUAA flow | Unchanged |

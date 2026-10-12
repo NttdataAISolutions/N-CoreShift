@@ -8,16 +8,15 @@ This router handles:
   - Safe response mapping
 
 N-CoreIQ HTTP mechanics live in: backend/integrations/ncoreiq_client.py
+N-CoreIQ token acquisition lives in: backend/integrations/ncoreiq_token_provider.py
 N-CoreIQ business logic lives in: backend/providers/ncoreiq_source_provider.py
 
 Security:
   - NCOREIQ_BASE_URL read from server environment (request body only in dev/disabled mode)
-  - Bearer tokens managed server-side (DEFERRED until BTP/XSUAA identity established)
+  - Bearer tokens managed server-side via NCoreIQTokenProvider (XSUAA client_credentials)
+  - Token provider singleton persists token cache across requests within a worker process
   - Authorization headers NEVER forwarded to or from browser
   - Upstream errors normalized before returning to browser
-
-SERVICE_TO_SERVICE_AUTH: DEFERRED UNTIL N-CORESHIFT BTP/XSUAA APPLICATION
-IDENTITY IS ESTABLISHED.
 """
 
 import logging
@@ -29,6 +28,10 @@ from sqlalchemy.orm import Session
 
 from database import get_db
 from integrations.ncoreiq_client import NCoreIQClient, NCoreIQError, resolve_base_url
+from integrations.ncoreiq_token_provider import (
+    NCoreIQTokenAcquisitionError,
+    get_ncoreiq_token_provider,
+)
 from providers.ncoreiq_source_provider import (
     NCOREIQ_DIRECT_IMPORT_LIMIT,
     NCoreIQSourceProvider,
@@ -44,14 +47,36 @@ router = APIRouter(prefix="/api/ncoreiq", tags=["N-CoreIQ"])
 
 def _make_provider(request_base_url: Optional[str] = None) -> tuple[NCoreIQSourceProvider, str]:
     """
-    Resolve base URL and create provider.
-    Raises HTTP 503 when N-CoreIQ is not configured in a mode that requires it.
+    Resolve base URL, acquire the process-level token provider, and create provider.
+
+    The token provider singleton ensures the XSUAA token cache persists across
+    requests within the worker process — avoids re-acquiring the token on every request.
+
+    Raises HTTP 503 when N-CoreIQ is not configured.
+    Raises HTTP 503 when XSUAA binding is missing in xsuaa mode.
     """
     try:
         base_url = resolve_base_url(request_base_url)
     except ValueError as exc:
-        raise HTTPException(status_code=503, detail={"error": "NCOREIQ_NOT_CONFIGURED", "message": str(exc)})
-    client = NCoreIQClient(base_url)
+        raise HTTPException(
+            status_code=503,
+            detail={"error": "NCOREIQ_NOT_CONFIGURED", "message": str(exc)},
+        )
+
+    try:
+        token_provider = get_ncoreiq_token_provider()
+    except NCoreIQTokenAcquisitionError as exc:
+        # Fail closed — XSUAA binding missing or invalid in xsuaa mode
+        logger.error("[NCoreIQ router] Token provider unavailable: %s (%s)", exc.reason, type(exc).__name__)
+        raise HTTPException(
+            status_code=503,
+            detail={
+                "error": "NCOREIQ_AUTH_NOT_CONFIGURED",
+                "message": f"N-CoreIQ authentication is not configured: {exc.reason}",
+            },
+        )
+
+    client = NCoreIQClient(base_url, token_provider=token_provider)
     provider = NCoreIQSourceProvider(client, get_job_store())
     return provider, base_url
 

@@ -9,6 +9,13 @@ description: "N-CoreShift – SAP Clean Core Modernization Agent"
 parameters:
   enable-parallel-deployments: true
   deploy-mode: blue-green
+  ## ── Cross-application identity parameters ────────────────────────────────
+  ## Foreign N-CoreIQ xsappname — resolved at deployment time.
+  ## Default assumes same-org/same-space co-deployment (same as ncoreiq mta.yaml).
+  ## Override for cross-space deployments:
+  ##   mbt build --set-param ncoreiq-xsappname=<effective-ncoreiq-xsappname>
+  ## or: cf deploy ... --parameter ncoreiq-xsappname=<value>
+  ncoreiq-xsappname: ncoreiq-${org}-${space}
 
 build-parameters:
   before-all:
@@ -113,6 +120,15 @@ resources:
       config:
         xsappname: ncoreshift-${org}-${space}
         tenant-mode: shared
+        ## Cross-application authorities — deployment-time substitution.
+        ## These override the (absent) authorities array in xs-security.json.
+        ## MTA replaces the top-level "authorities" key; no duplication occurs.
+        ## ${ncoreiq-xsappname} resolves to the effective N-CoreIQ xsappname
+        ## (default: ncoreiq-${org}-${space}; overridable for cross-space).
+        ## Operator and Admin are intentionally NOT listed (least privilege).
+        authorities:
+          - "${ncoreiq-xsappname}.NCoreIQ.Viewer"
+          - "${ncoreiq-xsappname}.NCoreIQ.Analyst"
 
   # ── SAP HANA Cloud (HDI container) ────────────────────────────────────────────
   - name: ncoreshift-db

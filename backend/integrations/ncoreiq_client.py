@@ -10,11 +10,13 @@ Responsibilities:
   - centralized endpoint path constants
   - httpx async HTTP calls
   - Authorization header injection (server-side only — NEVER from browser)
+  - token acquisition via NCoreIQTokenProvider (XSUAA client_credentials)
   - timeout handling
   - upstream error normalization (no stack traces, no credentials exposed)
 
-SERVICE_TO_SERVICE_AUTH: DEFERRED UNTIL N-CORESHIFT BTP/XSUAA APPLICATION
-IDENTITY IS ESTABLISHED.
+Authentication:
+  token_provider (NCoreIQTokenProvider) is the preferred path.
+  bearer_token (static str) is retained for backwards-compatible test fixtures only.
 
 Architecture decision:
   Python = CURRENT runtime adapter (N-CoreIQ → Python FastAPI → SQLite)
@@ -27,6 +29,8 @@ import os
 from typing import Any, Dict, Optional
 
 import httpx
+
+from integrations.ncoreiq_token_provider import NCoreIQTokenProvider
 
 logger = logging.getLogger(__name__)
 
@@ -87,8 +91,7 @@ def resolve_base_url(request_base_url: Optional[str] = None) -> str:
     if auth_mode != "disabled":
         raise ValueError(
             "NCOREIQ_BASE_URL must be configured server-side when "
-            "NCOREIQ_AUTH_MODE is not 'disabled'. "
-            "SERVICE_TO_SERVICE_AUTH: DEFERRED."
+            "NCOREIQ_AUTH_MODE is not 'disabled'."
         )
 
     if not request_base_url or not request_base_url.strip():
@@ -102,20 +105,49 @@ class NCoreIQClient:
     Async HTTP client for N-CoreIQ REST API v1.
     Instantiated per-request (stateless — no connection pooling across requests).
 
-    All auth token injection happens here (currently deferred).
+    Token acquisition is handled by the injected NCoreIQTokenProvider.
+    The provider caches the token across requests (process-level singleton).
     Authorization headers are NEVER exposed to callers or logged.
+
+    Parameters:
+        base_url      — N-CoreIQ backend URL (no trailing slash)
+        token_provider — NCoreIQTokenProvider for XSUAA client_credentials auth
+                          (preferred; used in production and test injection)
+        bearer_token  — Static bearer token string (backwards-compat for tests only)
+                          Ignored when token_provider is set.
     """
 
-    def __init__(self, base_url: str, bearer_token: Optional[str] = None):
+    def __init__(
+        self,
+        base_url: str,
+        token_provider: Optional[NCoreIQTokenProvider] = None,
+        bearer_token: Optional[str] = None,
+    ):
         self._base_url = base_url.rstrip("/")
-        # Bearer token held as opaque credential — never logged
+        # token_provider takes precedence over static bearer_token
+        self._token_provider = token_provider
+        # Static bearer token — retained for test fixture backwards-compatibility only
         self._bearer_token = bearer_token
 
-    def _headers(self) -> Dict[str, str]:
+    async def _get_bearer(self) -> Optional[str]:
+        """
+        Resolve the bearer token for this request.
+        token_provider.get_token() takes precedence over static bearer_token.
+        Returns None when auth is fully disabled (no header sent).
+        Token value is NEVER logged anywhere in this method.
+        """
+        if self._token_provider is not None:
+            token = await self._token_provider.get_token()
+            # DisabledModeTokenProvider returns '' — treat as no auth
+            return token if token else None
+        return self._bearer_token or None
+
+    def _build_headers(self, bearer: Optional[str]) -> Dict[str, str]:
+        """Build request headers. bearer is passed in (never fetched here)."""
         h = {"Content-Type": "application/json", "Accept": "application/json"}
-        if self._bearer_token:
-            h["Authorization"] = f"Bearer {self._bearer_token}"
-            # Token never written to any log — it is passed only to the HTTP request
+        if bearer:
+            h["Authorization"] = f"Bearer {bearer}"
+            # Token value is never written to any log
         return h
 
     @staticmethod
@@ -148,9 +180,11 @@ class NCoreIQClient:
     async def _get(self, path: str, params: Optional[Dict[str, str]] = None,
                    timeout: float = _DEFAULT_TIMEOUT) -> Any:
         url = f"{self._base_url}{path}"
+        bearer = await self._get_bearer()
+        headers = self._build_headers(bearer)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.get(url, headers=self._headers(), params=params or {})
+                resp = await client.get(url, headers=headers, params=params or {})
                 resp.raise_for_status()
                 return resp.json()
         except (NCoreIQError, NCoreIQTimeoutError, NCoreIQUnavailableError):
@@ -161,9 +195,11 @@ class NCoreIQClient:
     async def _post(self, path: str, body: Any,
                     timeout: float = _DEFAULT_TIMEOUT) -> Any:
         url = f"{self._base_url}{path}"
+        bearer = await self._get_bearer()
+        headers = self._build_headers(bearer)
         try:
             async with httpx.AsyncClient(timeout=timeout) as client:
-                resp = await client.post(url, json=body, headers=self._headers())
+                resp = await client.post(url, json=body, headers=headers)
                 resp.raise_for_status()
                 return resp.json()
         except (NCoreIQError, NCoreIQTimeoutError, NCoreIQUnavailableError):
