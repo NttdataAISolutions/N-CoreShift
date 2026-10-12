@@ -1,0 +1,166 @@
+{
+  "xsappname": "ncoreshift",
+  "tenant-mode": "shared",
+  "description": "N-CoreShift – SAP Clean Core Modernization Agent",
+  "scopes": [
+    {
+      "name": "$XSAPPNAME.User",
+      "description": "Basic access – view projects, read analyses and plans"
+    },
+    {
+      "name": "$XSAPPNAME.Consultant",
+      "description": "Create and manage analyses, override functional intent"
+    },
+    {
+      "name": "$XSAPPNAME.TechnicalConsultant",
+      "description": "Manage source ingestion, inventory, dependency analysis"
+    },
+    {
+      "name": "$XSAPPNAME.SolutionArchitect",
+      "description": "Approve modernization plans and architecture decisions"
+    },
+    {
+      "name": "$XSAPPNAME.CleanCoreApprover",
+      "description": "Approve landscape readiness and Clean Core assessments"
+    },
+    {
+      "name": "$XSAPPNAME.ProjectAdmin",
+      "description": "Create/manage projects, configure landscape profiles"
+    },
+    {
+      "name": "$XSAPPNAME.PlatformAdmin",
+      "description": "Configure AI providers, manage platform settings"
+    },
+    {
+      "name": "uaa.user",
+      "description": "UAA user scope (required for token exchange)",
+      "granted-apps": ["$XSAPPNAME"]
+    }
+  ],
+  "attributes": [
+    {
+      "name": "tenantId",
+      "description": "Tenant identifier for data isolation",
+      "valueType": "string"
+    }
+  ],
+  "role-templates": [
+    {
+      "name": "NCoreShift_User",
+      "description": "Basic N-CoreShift user",
+      "scope-references": ["$XSAPPNAME.User"],
+      "attribute-references": ["tenantId"]
+    },
+    {
+      "name": "NCoreShift_Consultant",
+      "description": "SAP Consultant role",
+      "scope-references": [
+        "$XSAPPNAME.User",
+        "$XSAPPNAME.Consultant"
+      ],
+      "attribute-references": ["tenantId"]
+    },
+    {
+      "name": "NCoreShift_TechnicalConsultant",
+      "description": "Technical Consultant role",
+      "scope-references": [
+        "$XSAPPNAME.User",
+        "$XSAPPNAME.Consultant",
+        "$XSAPPNAME.TechnicalConsultant"
+      ],
+      "attribute-references": ["tenantId"]
+    },
+    {
+      "name": "NCoreShift_SolutionArchitect",
+      "description": "Solution Architect role",
+      "scope-references": [
+        "$XSAPPNAME.User",
+        "$XSAPPNAME.Consultant",
+        "$XSAPPNAME.TechnicalConsultant",
+        "$XSAPPNAME.SolutionArchitect"
+      ],
+      "attribute-references": ["tenantId"]
+    },
+    {
+      "name": "NCoreShift_CleanCoreApprover",
+      "description": "Clean Core Approver role",
+      "scope-references": [
+        "$XSAPPNAME.User",
+        "$XSAPPNAME.CleanCoreApprover"
+      ],
+      "attribute-references": ["tenantId"]
+    },
+    {
+      "name": "NCoreShift_ProjectAdmin",
+      "description": "Project Administrator role",
+      "scope-references": [
+        "$XSAPPNAME.User",
+        "$XSAPPNAME.Consultant",
+        "$XSAPPNAME.TechnicalConsultant",
+        "$XSAPPNAME.ProjectAdmin"
+      ],
+      "attribute-references": ["tenantId"]
+    },
+    {
+      "name": "NCoreShift_PlatformAdmin",
+      "description": "Platform Administrator role – full access",
+      "scope-references": [
+        "$XSAPPNAME.User",
+        "$XSAPPNAME.Consultant",
+        "$XSAPPNAME.TechnicalConsultant",
+        "$XSAPPNAME.SolutionArchitect",
+        "$XSAPPNAME.CleanCoreApprover",
+        "$XSAPPNAME.ProjectAdmin",
+        "$XSAPPNAME.PlatformAdmin"
+      ],
+      "attribute-references": ["tenantId"]
+    }
+  ],
+  "role-collections": [
+    {
+      "name": "NCoreShift_User",
+      "description": "Assigns basic N-CoreShift User role",
+      "role-template-references": ["$XSAPPNAME.NCoreShift_User"]
+    },
+    {
+      "name": "NCoreShift_Consultant",
+      "description": "Assigns N-CoreShift Consultant role",
+      "role-template-references": ["$XSAPPNAME.NCoreShift_Consultant"]
+    },
+    {
+      "name": "NCoreShift_TechnicalConsultant",
+      "description": "Assigns N-CoreShift Technical Consultant role",
+      "role-template-references": ["$XSAPPNAME.NCoreShift_TechnicalConsultant"]
+    },
+    {
+      "name": "NCoreShift_SolutionArchitect",
+      "description": "Assigns N-CoreShift Solution Architect role",
+      "role-template-references": ["$XSAPPNAME.NCoreShift_SolutionArchitect"]
+    },
+    {
+      "name": "NCoreShift_CleanCoreApprover",
+      "description": "Assigns N-CoreShift Clean Core Approver role",
+      "role-template-references": ["$XSAPPNAME.NCoreShift_CleanCoreApprover"]
+    },
+    {
+      "name": "NCoreShift_ProjectAdmin",
+      "description": "Assigns N-CoreShift Project Admin role",
+      "role-template-references": ["$XSAPPNAME.NCoreShift_ProjectAdmin"]
+    },
+    {
+      "name": "NCoreShift_PlatformAdmin",
+      "description": "Assigns N-CoreShift Platform Admin role (full access)",
+      "role-template-references": ["$XSAPPNAME.NCoreShift_PlatformAdmin"]
+    }
+  ],
+  "oauth2-configuration": {
+    "token-validity": 43200,
+    "refresh-token-validity": 2592000,
+    "redirect-uris": [
+      "https://*.cfapps.*.hana.ondemand.com/**",
+      "https://*.hana.ondemand.com/**",
+      "http://localhost:5173/**",
+      "http://localhost:4004/**"
+    ]
+  }
+}

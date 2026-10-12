@@ -1,0 +1,82 @@
+
+> n-guard@0.1.0 lint
+> eslint "srv/src/**/*.ts" "agent/src/**/*.ts" "app/src/**/*.{ts,tsx}"
+
+
+c:\N-Guard\agent\src\__tests__\agent-orchestrator.test.ts
+   80:37  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  105:21  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  115:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  120:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  121:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  127:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  147:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  148:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  149:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  169:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  171:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  191:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  192:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  212:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  213:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  233:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  257:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  258:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  279:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  280:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  304:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+  375:12  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+
+c:\N-Guard\agent\src\__tests__\async-job-queue.test.ts
+  21:32  warning  'beforeEach' is defined but never used  @typescript-eslint/no-unused-vars
+
+c:\N-Guard\agent\src\__tests__\cross-edition-comparison.test.ts
+  132:25  warning  Forbidden non-null assertion                    @typescript-eslint/no-non-null-assertion
+  136:24  warning  Forbidden non-null assertion                    @typescript-eslint/no-non-null-assertion
+  168:20  warning  Forbidden non-null assertion                    @typescript-eslint/no-non-null-assertion
+  169:20  warning  Forbidden non-null assertion                    @typescript-eslint/no-non-null-assertion
+  170:20  warning  Forbidden non-null assertion                    @typescript-eslint/no-non-null-assertion
+  186:9   warning  'callCount' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  227:23  warning  Forbidden non-null assertion                    @typescript-eslint/no-non-null-assertion
+  228:23  warning  Forbidden non-null assertion                    @typescript-eslint/no-non-null-assertion
+  229:23  warning  Forbidden non-null assertion                    @typescript-eslint/no-non-null-assertion
+
+c:\N-Guard\agent\src\comparison\CrossEditionComparisonEngine.ts
+  167:3  warning  'editions' is defined but never used. Allowed unused args must match /^_/u  @typescript-eslint/no-unused-vars
+
+c:\N-Guard\agent\src\providers\SapAICoreProvider.ts
+  233:40  warning  Forbidden non-null assertion  @typescript-eslint/no-non-null-assertion
+
+c:\N-Guard\agent\src\providers\SapAIInterfaceProvider.ts
+  134:3  warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-unused-vars')
+
+c:\N-Guard\app\src\pages\AssessmentPage.tsx
+   20:7  warning  'FC_COLORS' is assigned a value but never used                   @typescript-eslint/no-unused-vars
+   25:7  warning  'FC_LABELS' is assigned a value but never used                   @typescript-eslint/no-unused-vars
+  282:5  error    Definition for rule 'react-hooks/exhaustive-deps' was not found  react-hooks/exhaustive-deps
+  293:5  error    Definition for rule 'react-hooks/exhaustive-deps' was not found  react-hooks/exhaustive-deps
+
+c:\N-Guard\srv\src\handlers\admin-service.ts
+   21:3   warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-explicit-any')
+  142:9   warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-explicit-any')
+  220:35  warning  'req' is defined but never used. Allowed unused args must match /^_/u                                  @typescript-eslint/no-unused-vars
+
+c:\N-Guard\srv\src\handlers\ingestion-handler.ts
+   55:3   warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-explicit-any')
+  148:33  warning  Forbidden non-null assertion                                                                           @typescript-eslint/no-non-null-assertion
+  158:24  warning  Forbidden non-null assertion                                                                           @typescript-eslint/no-non-null-assertion
+  170:24  warning  Forbidden non-null assertion                                                                           @typescript-eslint/no-non-null-assertion
+  180:46  warning  Forbidden non-null assertion                                                                           @typescript-eslint/no-non-null-assertion
+  191:26  warning  Forbidden non-null assertion                                                                           @typescript-eslint/no-non-null-assertion
+  192:26  warning  Forbidden non-null assertion                                                                           @typescript-eslint/no-non-null-assertion
+  209:20  warning  Forbidden non-null assertion                                                                           @typescript-eslint/no-non-null-assertion
+  210:20  warning  Forbidden non-null assertion                                                                           @typescript-eslint/no-non-null-assertion
+  214:31  warning  Forbidden non-null assertion                                                                           @typescript-eslint/no-non-null-assertion
+  215:31  warning  Forbidden non-null assertion                                                                           @typescript-eslint/no-non-null-assertion
+
+c:\N-Guard\srv\src\handlers\nguard-service.ts
+  21:3  warning  Unused eslint-disable directive (no problems were reported from '@typescript-eslint/no-explicit-any')
+
+✖ 54 problems (2 errors, 52 warnings)
+  0 errors and 5 warnings potentially fixable with the `--fix` option.
+

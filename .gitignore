@@ -1,0 +1,43 @@
+node_modules/
+dist/
+*.js.map
+*.d.ts.map
+.env
+.env.local
+.env.*.local
+*.sqlite
+*.db
+logs/
+*.log
+npm-debug.log*
+coverage/
+.DS_Store
+Thumbs.db
+.vscode/settings.json
+
+# graphify-axet
+.graphify/
+
+# TypeScript build info (generated artifacts)
+*.tsbuildinfo
+
+# CI / local run-output scratch files
+*-out.txt
+*-run.txt
+*-results.txt
+*-output.txt
+*-final.txt
+agent-ai-admin-test.txt
+agent-test-output.txt
+agent-test-results.txt
+jest-output.txt
+jest-err.txt
+jest-agent-out.txt
+jest-srv-out.txt
+srv-ai-admin-test.txt
+lint-out.txt
+fix-parser.ps1
+write-parser.ps1
+write-test.ps1
+stop-ncoreshift.bat
+start-ncoreshift.bat

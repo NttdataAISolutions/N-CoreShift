@@ -1,0 +1,163 @@
+## N-CoreShift – Multi-Target Application Deployment Descriptor
+## Target: SAP BTP Cloud Foundry
+## Build: mbt build  /  Deploy: cf deploy mta_archives/ncoreshift_*.mtar
+_schema-version: "3.3.0"
+ID: ncoreshift
+version: 1.0.0
+description: "N-CoreShift – SAP Clean Core Modernization Agent"
+
+parameters:
+  enable-parallel-deployments: true
+  deploy-mode: blue-green
+
+build-parameters:
+  before-all:
+    - builder: custom
+      commands:
+        - npm ci --prefix srv
+        - npm run build --prefix srv
+        - npm ci --prefix app
+        - npm run build --prefix app
+
+modules:
+
+  # ── Backend: CAP Node.js service ─────────────────────────────────────────────
+  - name: ncoreshift-srv
+    type: nodejs
+    path: srv
+    build-parameters:
+      builder: custom
+      commands: []
+      ignore:
+        - node_modules/
+        - .env
+        - "*.local.*"
+    parameters:
+      buildpack: nodejs_buildpack
+      memory: 512M
+      disk-quota: 1024M
+      health-check-type: http
+      health-check-http-endpoint: /health
+    properties:
+      NODE_ENV: production
+      NCS_LOG_LEVEL: info
+    requires:
+      - name: ncoreshift-uaa
+        parameters:
+          config:
+            xsuaa-service-credentials: ~{credentials}
+      - name: ncoreshift-db
+        parameters:
+          config:
+            hdi-service-credentials: ~{credentials}
+      - name: ncoreshift-destination
+      - name: ncoreshift-connectivity
+      - name: ncoreshift-objectstore
+      - name: ncoreshift-aicore
+      - name: ncoreshift-logging
+    provides:
+      - name: ncoreshift-srv-api
+        properties:
+          srv-url: ${default-url}
+
+  # ── Frontend: App Router + HTML5 application ──────────────────────────────────
+  - name: ncoreshift-app
+    type: approuter.nodejs
+    path: app
+    build-parameters:
+      builder: custom
+      commands: []
+      ignore:
+        - node_modules/
+        - .env
+        - dist/
+    parameters:
+      memory: 256M
+      disk-quota: 512M
+      health-check-type: port
+    properties:
+      TENANT_HOST_PATTERN: "^(.*)-${default-uri}"
+    requires:
+      - name: ncoreshift-uaa
+      - name: ncoreshift-srv-api
+        group: destinations
+        properties:
+          name: ncoreshift-srv
+          url: ~{srv-url}
+          forwardAuthToken: true
+      - name: ncoreshift-logging
+
+  # ── HDI container deployer ────────────────────────────────────────────────────
+  - name: ncoreshift-db-deployer
+    type: hdb
+    path: db
+    build-parameters:
+      ignore:
+        - node_modules/
+    parameters:
+      buildpack: nodejs_buildpack
+      memory: 256M
+      disk-quota: 512M
+    requires:
+      - name: ncoreshift-db
+
+resources:
+
+  # ── XSUAA (Authorization & Trust Management) ──────────────────────────────────
+  - name: ncoreshift-uaa
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: xsuaa
+      service-plan: application
+      path: ./xs-security.json
+      config:
+        xsappname: ncoreshift-${org}-${space}
+        tenant-mode: shared
+
+  # ── SAP HANA Cloud (HDI container) ────────────────────────────────────────────
+  - name: ncoreshift-db
+    type: com.sap.xs.hdi-container
+    parameters:
+      service: hana
+      service-plan: hdi-shared
+    properties:
+      hdi-service-name: ${service-name}
+
+  # ── Destination Service ────────────────────────────────────────────────────────
+  - name: ncoreshift-destination
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: destination
+      service-plan: lite
+
+  # ── Connectivity Service ────────────────────────────────────────────────────────
+  - name: ncoreshift-connectivity
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: connectivity
+      service-plan: lite
+
+  # ── Object Store Service ───────────────────────────────────────────────────────
+  - name: ncoreshift-objectstore
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: objectstore
+      service-plan: s3-standard
+      config:
+        region: us-east-1
+
+  # ── SAP AI Core (Generative AI Hub) ───────────────────────────────────────────
+  - name: ncoreshift-aicore
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: aicore
+      service-plan: extended
+      config:
+        servicePlanTier: extended
+
+  # ── Application Logging Service ────────────────────────────────────────────────
+  - name: ncoreshift-logging
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: application-logs
+      service-plan: lite

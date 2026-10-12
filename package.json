@@ -1,0 +1,42 @@
+{
+  "name": "n-coreshift",
+  "version": "0.1.0",
+  "private": true,
+  "description": "N-CoreShift – SAP Clean Core Modernization Agent",
+  "workspaces": [
+    "agent",
+    "srv",
+    "app"
+  ],
+  "scripts": {
+    "install:all": "npm install",
+    "lint": "npm run lint --workspaces --if-present",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "test": "npm run test --workspaces --if-present",
+    "build": "npm run build --workspaces --if-present",
+    "validate": "npm run lint && npm run typecheck && npm run test && npm run build",
+    "dev:srv": "npm run dev --workspace=srv",
+    "dev:app": "npm run dev --workspace=app"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.0.0",
+    "@types/supertest": "^7.2.1",
+    "@typescript-eslint/eslint-plugin": "^8.0.0",
+    "@typescript-eslint/parser": "^8.0.0",
+    "eslint": "^9.0.0",
+    "eslint-plugin-react-hooks": "^7.1.1",
+    "prettier": "^3.3.3",
+    "supertest": "^7.3.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.5.4"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "allowScripts": {
+    "esbuild@0.21.5": true
+  },
+  "dependencies": {
+    "dotenv": "^18.0.4"
+  }
+}

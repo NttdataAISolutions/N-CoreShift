@@ -1,0 +1,66 @@
+
+> n-guard@0.1.0 test
+> npm run test:srv && npm run test:agent
+
+
+> n-guard@0.1.0 test:srv
+> jest --config jest.config.ts --passWithNoTests
+
+PASS srv/__tests__/app-service.test.ts
+PASS srv/__tests__/requirements-workspace.test.ts
+PASS srv/__tests__/deployment-profile.test.ts
+PASS srv/__tests__/e2e-workflow.test.ts
+
+Test Suites: 4 passed, 4 total
+Tests:       148 passed, 148 total
+Snapshots:   0 total
+Time:        11.354 s
+Ran all test suites.
+
+> n-guard@0.1.0 test:agent
+> npm run test --workspace=agent
+
+
+> @n-guard/agent@0.1.0 test
+> cross-env NODE_OPTIONS=--experimental-vm-modules jest --config jest.config.ts
+
+(node:6672) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS src/__tests__/async-job-queue.test.ts (5.715 s)
+(node:19216) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:47920) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:39536) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:7956) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS src/__tests__/security.test.ts (6.114 s)
+PASS src/__tests__/cleancore.test.ts (6.636 s)
+(node:31444) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+(node:30756) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS src/__tests__/sap-ai-interface.test.ts (6.597 s)
+(node:41016) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS src/__tests__/agent-engine.test.ts (6.622 s)
+(node:33068) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS src/__tests__/knowledge-search.test.ts (7.091 s)
+PASS src/__tests__/cross-edition-comparison.test.ts (6.881 s)
+PASS src/__tests__/agent-orchestrator.test.ts (7.441 s)
+(node:29228) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS src/__tests__/knowledge-ingestion.test.ts (7.147 s)
+PASS src/__tests__/fit-assessment.test.ts (7.379 s)
+(node:26184) ExperimentalWarning: VM Modules is an experimental feature and might change at any time
+(Use `node --trace-warnings ...` to show where the warning was created)
+PASS src/__tests__/review-workflow.test.ts (6.349 s)
+
+Test Suites: 11 passed, 11 total
+Tests:       328 passed, 328 total
+Snapshots:   0 total
+Time:        21.98 s
+Ran all test suites.
+"DONE"  
