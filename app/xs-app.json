@@ -6,13 +6,12 @@
     "logoutEndpoint": "/do/logout",
     "logoutPage": "/index.html"
   },
-  "destinations": [
-    {
-      "name": "ncoreshift-srv",
+  "destinations": {
+    "ncoreshift-srv": {
       "logoutPath": "/do/logout",
       "logoutMethod": "POST"
     }
-  ],
+  },
   "routes": [
     {
       "source": "^/api/ncoreiq/(.*)$",
