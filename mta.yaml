@@ -21,10 +21,10 @@ build-parameters:
   before-all:
     - builder: custom
       commands:
-        - npm ci --prefix srv
-        - npm run build --prefix srv
-        - npm ci --prefix app
-        - npm run build --prefix app
+        - npm ci --workspace=@n-coreshift/srv
+        - npm run build --workspace=@n-coreshift/srv
+        - npm ci --workspace=@n-coreshift/app
+        - npm run build --workspace=@n-coreshift/app
 
 modules:
 
@@ -67,6 +67,51 @@ modules:
         properties:
           srv-url: ${default-url}
 
+  # ── Python FastAPI: N-CoreIQ runtime ─────────────────────────────────────────
+  - name: ncoreshift-python
+    type: python
+    path: backend
+    build-parameters:
+      builder: custom
+      commands: []
+      ignore:
+        - .env
+        - .env.*
+        - .env.example
+        - __pycache__/
+        - "*.pyc"
+        - .pytest_cache/
+        - tests/
+        - "*.db"
+        - "*.sqlite"
+        - "*.sqlite3"
+        - "*.log"
+        - coverage/
+        - htmlcov/
+        - uploads/
+        - generated-artifacts/
+        - "*.zip"
+        - "*.mtar"
+        - .vscode/
+        - .idea/
+    parameters:
+      buildpack: python_buildpack
+      memory: 512M
+      disk-quota: 1024M
+      instances: 1
+      health-check-type: http
+      health-check-http-endpoint: /api/health
+    properties:
+      PYTHON_ENV: production
+      NCOREIQ_AUTH_MODE: xsuaa
+      NCOREIQ_BASE_URL: https://ncoreiq.cfapps.us10.hana.ondemand.com
+    requires:
+      - name: ncoreshift-uaa
+    provides:
+      - name: ncoreshift-python-api
+        properties:
+          python-url: ${default-url}
+
   # ── Frontend: App Router + HTML5 application ──────────────────────────────────
   - name: ncoreshift-app
     type: approuter.nodejs
@@ -91,6 +136,12 @@ modules:
         properties:
           name: ncoreshift-srv
           url: ~{srv-url}
+          forwardAuthToken: true
+      - name: ncoreshift-python-api
+        group: destinations
+        properties:
+          name: ncoreshift-python
+          url: ~{python-url}
           forwardAuthToken: true
       - name: ncoreshift-logging
 
@@ -127,8 +178,8 @@ resources:
         ## (default: ncoreiq-${org}-${space}; overridable for cross-space).
         ## Operator and Admin are intentionally NOT listed (least privilege).
         authorities:
-          - "${ncoreiq-xsappname}.NCoreIQ.Viewer"
-          - "${ncoreiq-xsappname}.NCoreIQ.Analyst"
+          - "$XSAPPNAME(application,${ncoreiq-xsappname}).NCoreIQ.Viewer"
+          - "$XSAPPNAME(application,${ncoreiq-xsappname}).NCoreIQ.Analyst"
 
   # ── SAP HANA Cloud (HDI container) ────────────────────────────────────────────
   - name: ncoreshift-db

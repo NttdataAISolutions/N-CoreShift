@@ -115,6 +115,29 @@ class ImportRequest(BaseModel):
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
+@router.get("/csrf")
+async def csrf_token_endpoint():
+    """
+    CSRF token acquisition endpoint.
+
+    Purpose:
+        Allows the browser to send  X-CSRF-Token: Fetch  through the AppRouter
+        on this authenticated route and receive an AppRouter-generated CSRF
+        token before performing POST operations.
+
+    This endpoint:
+      - Returns a minimal safe success response only.
+      - Does NOT return credentials, JWTs, service tokens, or SAP data.
+      - Does NOT perform N-CoreIQ calls or change any state.
+      - Is protected by the same XSUAA inbound auth as all other /api/ncoreiq/*
+        routes (exempt from auth only at /api/health per middleware config).
+
+    The actual CSRF token is injected by the AppRouter into the response
+    headers (X-CSRF-Token) before the response reaches the browser.
+    """
+    return {"success": True, "message": "CSRF token endpoint"}
+
+
 @router.post("/ping")
 async def ping(req: PingRequest):
     """Test N-CoreIQ → SAP connectivity. Returns connection status + SAP provenance."""

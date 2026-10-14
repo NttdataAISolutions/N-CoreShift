@@ -89,6 +89,35 @@ export function NCoreIQConnectModal({
   const { projects, activeProjectId } = state;
   const [selProjectId, setSelProjectId] = useState(activeProjectId ?? projects[0]?.id ?? '');
 
+  // ── CSRF token (AppRouter session token for POST operations) ───────────
+  // Fetched once per modal session via GET /api/ncoreiq/csrf before the
+  // first POST. Cached for subsequent calls. Never exposed in the UI.
+  const [_csrfToken, _setCsrfToken] = useState<string | null>(null);
+  const _csrfTokenRef = React.useRef<string | null>(null);
+
+  async function _ensureCsrfToken(): Promise<string> {
+    if (_csrfTokenRef.current) return _csrfTokenRef.current;
+    try {
+      const resp = await fetch('/api/ncoreiq/csrf', {
+        method: 'GET',
+        credentials: 'same-origin',
+        headers: { 'X-CSRF-Token': 'Fetch' },
+      });
+      const token = resp.headers.get('X-CSRF-Token');
+      if (!token) {
+        // AppRouter may not inject a CSRF token in non-production / local dev.
+        // Fall back to empty string so POSTs are not blocked locally.
+        return '';
+      }
+      _csrfTokenRef.current = token;
+      _setCsrfToken(token);
+      return token;
+    } catch {
+      // Network failure acquiring CSRF token — surface a safe error.
+      throw new Error('Could not acquire CSRF token. Please reload and try again.');
+    }
+  }
+
   // ── Step state ──────────────────────────────────────────────────────────
   const [step, setStep] = useState<Step>('connection');
 
@@ -122,9 +151,14 @@ export function NCoreIQConnectModal({
     setTestingConn(true);
     setConnStatus(null);
     try {
+      const csrfToken = await _ensureCsrfToken();
       const resp = await fetch('/api/ncoreiq/ping', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+        },
         body: JSON.stringify({ baseUrl: ncoreiqUrl.trim() }),
       });
       const json = await resp.json();
@@ -145,10 +179,11 @@ export function NCoreIQConnectModal({
           testedAt: new Date().toISOString(),
         });
       }
-    } catch {
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Network error — check that N-CoreIQ is reachable';
       setConnStatus({
         connected: false, systemId: null, client: null, sapRelease: null,
-        error: 'Network error — check that N-CoreIQ is reachable',
+        error: msg,
         testedAt: new Date().toISOString(),
       });
     } finally {
@@ -163,9 +198,14 @@ export function NCoreIQConnectModal({
     setLoadingPackages(true);
     setPackageError(null);
     try {
+      const csrfToken = await _ensureCsrfToken();
       const resp = await fetch('/api/ncoreiq/packages', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+        },
         body: JSON.stringify({
           baseUrl: ncoreiqUrl.trim() || undefined,
           package: rootPackage.trim(),
@@ -178,8 +218,9 @@ export function NCoreIQConnectModal({
       } else {
         setPackageError(json.error ?? 'Failed to load packages');
       }
-    } catch {
-      setPackageError('Network error loading packages');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Network error loading packages';
+      setPackageError(msg);
     } finally {
       setLoadingPackages(false);
     }
@@ -198,9 +239,14 @@ export function NCoreIQConnectModal({
     setLoadingPreview(true);
     setPreviewError(null);
     try {
+      const csrfToken = await _ensureCsrfToken();
       const resp = await fetch('/api/ncoreiq/preview', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+        },
         body: JSON.stringify({
           baseUrl: ncoreiqUrl.trim() || undefined,
           packages: selectedPackages,
@@ -214,8 +260,9 @@ export function NCoreIQConnectModal({
       } else {
         setPreviewError(json.error ?? 'Failed to load object preview');
       }
-    } catch {
-      setPreviewError('Network error loading preview');
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Network error loading preview';
+      setPreviewError(msg);
     } finally {
       setLoadingPreview(false);
     }
@@ -230,10 +277,15 @@ export function NCoreIQConnectModal({
     setImportErrors([]);
     setImportMessage('Starting bulk extraction job…');
     try {
+      const csrfToken = await _ensureCsrfToken();
       const proj = projects.find((p) => p.id === selProjectId);
       const resp = await fetch('/api/ncoreiq/import', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        credentials: 'same-origin',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(csrfToken ? { 'X-CSRF-Token': csrfToken } : {}),
+        },
         body: JSON.stringify({
           projectId: selProjectId,
           projectName: proj?.name,
@@ -253,9 +305,10 @@ export function NCoreIQConnectModal({
         setImportMessage('Failed to start import job');
         setImportErrors([json.error ?? 'Unknown error']);
       }
-    } catch {
+    } catch (err: unknown) {
       setImportStatus('failed');
-      setImportMessage('Network error starting import');
+      const msg = err instanceof Error ? err.message : 'Network error starting import';
+      setImportMessage(msg);
     }
   }
 
