@@ -50,13 +50,7 @@ modules:
       NCS_LOG_LEVEL: info
     requires:
       - name: ncoreshift-uaa
-        parameters:
-          config:
-            xsuaa-service-credentials: ~{credentials}
       - name: ncoreshift-db
-        parameters:
-          config:
-            hdi-service-credentials: ~{credentials}
       - name: ncoreshift-destination
       - name: ncoreshift-connectivity
       - name: ncoreshift-objectstore
