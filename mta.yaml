@@ -21,9 +21,8 @@ build-parameters:
   before-all:
     - builder: custom
       commands:
-        - npm ci --workspace=@n-coreshift/srv
+        - npm ci --include=optional
         - npm run build --workspace=@n-coreshift/srv
-        - npm ci --workspace=@n-coreshift/app
         - npm run build --workspace=@n-coreshift/app
 
 modules:
