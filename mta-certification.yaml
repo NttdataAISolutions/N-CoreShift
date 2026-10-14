@@ -39,6 +39,7 @@ modules:
         - .vscode/
         - .idea/
     parameters:
+      host: ncoreshift-python
       buildpack: python_buildpack
       memory: 512M
       disk-quota: 1024M
@@ -66,6 +67,7 @@ modules:
         - node_modules/
         - .env
     parameters:
+      host: ncoreshift-app
       memory: 256M
       disk-quota: 512M
       instances: 1
