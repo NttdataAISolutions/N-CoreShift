@@ -15,12 +15,6 @@
       "csrfProtection": true
     },
     {
-      "source": "^/do/logout$",
-      "logout": {
-        "logoutEndpoint": "/do/logout"
-      }
-    },
-    {
       "source": "^/(.*)$",
       "target": "/$1",
       "localDir": "dist",
