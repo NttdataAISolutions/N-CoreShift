@@ -1,21 +1,28 @@
 import React, { useState, useRef } from 'react';
 import { useAppStore } from '../store/AppStoreContext';
 
+interface UploadResult {
+  fileName: string;
+  status: 'pending' | 'uploading' | 'success' | 'error';
+  message?: string;
+  linesOfCode?: number;
+}
+
 export function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUploaded?: () => void }) {
   const { state } = useAppStore();
   const { projects, activeProjectId } = state;
   const [selId, setSelId] = useState(activeProjectId ?? projects[0]?.id ?? '');
-  const [files, setFiles] = useState([]);
-  const [results, setResults] = useState([]);
+  const [files, setFiles] = useState<File[]>([]);
+  const [results, setResults] = useState<UploadResult[]>([]);
   const [uploading, setUploading] = useState(false);
   const [drag, setDrag] = useState(false);
-  const ref = React.useRef(null);
+  const ref = useRef<HTMLInputElement>(null);
 
-  async function resolveBackendId(name) {
+  async function resolveBackendId(name: string) {
     try {
       const r = await fetch('/api/projects');
       const j = await r.json();
-      const list = Array.isArray(j.data) ? j.data : [];
+      const list: Array<{ name: string; id: string }> = Array.isArray(j.data) ? j.data : [];
       const found = list.find(p => p.name === name);
       if (found) return found.id;
       const cr = await fetch('/api/projects', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name, description: 'Auto-created' }) });
@@ -24,10 +31,10 @@ export function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUp
     } catch { return null; }
   }
 
-  function addFiles(fl) {
+  function addFiles(fl: FileList | null) {
     if (!fl) return;
     const ok = ['abap','prog','class','fugr','badi','enho','txt','inc'];
-    const acc = []; let skip = 0;
+    const acc: File[] = []; let skip = 0;
     Array.from(fl).forEach(f => { const e = f.name.split('.').pop()?.toLowerCase() ?? ''; if (ok.includes(e)) acc.push(f); else skip++; });
     if (skip) alert(skip + ' file(s) skipped.');
     setFiles(prev => { const ex = new Set(prev.map(f => f.name)); return [...prev, ...acc.filter(f => !ex.has(f.name))]; });
@@ -38,20 +45,20 @@ export function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUp
     const proj = projects.find(p => p.id === selId);
     if (!proj) return;
     setUploading(true);
-    setResults(files.map(f => ({ fileName: f.name, status: 'pending' })));
+    setResults(files.map(f => ({ fileName: f.name, status: 'pending' as const })));
     const bid = await resolveBackendId(proj.name);
-    if (!bid) { setResults(files.map(f => ({ fileName: f.name, status: 'error', message: 'Backend error' }))); setUploading(false); return; }
+    if (!bid) { setResults(files.map(f => ({ fileName: f.name, status: 'error' as const, message: 'Backend error' }))); setUploading(false); return; }
     for (const file of files) {
-      setResults(p => p.map(r => r.fileName === file.name ? { ...r, status: 'uploading' } : r));
+      setResults(p => p.map(r => r.fileName === file.name ? { ...r, status: 'uploading' as const } : r));
       try {
         const fd = new FormData(); fd.append('file', file);
         const resp = await fetch('/api/projects/' + bid + '/objects/upload', { method: 'POST', body: fd });
         const json = await resp.json();
         if (resp.ok && json.success)
-          setResults(p => p.map(r => r.fileName === file.name ? { ...r, status: 'success', linesOfCode: json.data?.lines_of_code } : r));
+          setResults(p => p.map(r => r.fileName === file.name ? { ...r, status: 'success' as const, linesOfCode: json.data?.lines_of_code } : r));
         else
-          setResults(p => p.map(r => r.fileName === file.name ? { ...r, status: 'error', message: json.detail ?? 'Failed' } : r));
-      } catch { setResults(p => p.map(r => r.fileName === file.name ? { ...r, status: 'error', message: 'Network error' } : r)); }
+          setResults(p => p.map(r => r.fileName === file.name ? { ...r, status: 'error' as const, message: json.detail ?? 'Failed' } : r));
+      } catch { setResults(p => p.map(r => r.fileName === file.name ? { ...r, status: 'error' as const, message: 'Network error' } : r)); }
     }
     setUploading(false);
   }
@@ -59,12 +66,12 @@ export function UploadModal({ onClose, onUploaded }: { onClose: () => void; onUp
   const done = results.length > 0 && results.every(r => r.status === 'success' || r.status === 'error');
   const successCount = results.filter(r => r.status === 'success').length;
   const errorCount = results.filter(r => r.status === 'error').length;
-  const icon = s => s === 'success' ? '[OK]' : s === 'error' ? '[ERR]' : s === 'uploading' ? '[..]' : '[ ]';
+  const icon = (s: string) => s === 'success' ? '[OK]' : s === 'error' ? '[ERR]' : s === 'uploading' ? '[..]' : '[ ]';
   const exts = ['.abap','.prog','.class','.fugr','.badi','.enho','.txt','.inc'];
-  const ov = { position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' };
-  const md = { background: 'var(--ncs-surface)', border: '1px solid var(--ncs-border)', borderRadius: '12px', padding: '1.75rem', width: '100%', maxWidth: '580px', maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 8px 48px rgba(0,0,0,.4)' };
-  const inpS = { width: '100%', boxSizing: 'border-box', padding: '.45rem .6rem', border: '1px solid var(--ncs-border)', borderRadius: '6px', background: 'var(--ncs-bg)', color: 'var(--ncs-text)', fontSize: '.88rem' };
-  const lblS = { display: 'block', fontSize: '.77rem', fontWeight: 600, color: 'var(--ncs-muted)', marginBottom: '.25rem' };
+  const ov: React.CSSProperties = { position: 'fixed', inset: 0, background: 'rgba(0,0,0,.55)', zIndex: 1100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: '1rem' };
+  const md: React.CSSProperties = { background: 'var(--ncs-surface)', border: '1px solid var(--ncs-border)', borderRadius: '12px', padding: '1.75rem', width: '100%', maxWidth: '580px', maxHeight: '90vh', overflowY: 'auto', boxShadow: '0 8px 48px rgba(0,0,0,.4)' };
+  const inpS: React.CSSProperties = { width: '100%', boxSizing: 'border-box', padding: '.45rem .6rem', border: '1px solid var(--ncs-border)', borderRadius: '6px', background: 'var(--ncs-bg)', color: 'var(--ncs-text)', fontSize: '.88rem' };
+  const lblS: React.CSSProperties = { display: 'block', fontSize: '.77rem', fontWeight: 600, color: 'var(--ncs-muted)', marginBottom: '.25rem' };
 
   return (
     <div style={ov} onClick={e => { if (e.target === e.currentTarget && !uploading) onClose(); }}>
