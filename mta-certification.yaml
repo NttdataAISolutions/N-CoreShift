@@ -59,7 +59,7 @@ modules:
 
   - name: ncoreshift-app
     type: approuter.nodejs
-    path: app
+    path: app-certification
     build-parameters:
       builder: custom
       commands: []

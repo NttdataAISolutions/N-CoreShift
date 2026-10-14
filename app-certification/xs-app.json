@@ -1,0 +1,30 @@
+{
+  "welcomeFile": "/index.html",
+  "authenticationMethod": "route",
+  "sessionTimeout": 30,
+  "logout": {
+    "logoutEndpoint": "/do/logout",
+    "logoutPage": "/index.html"
+  },
+  "routes": [
+    {
+      "source": "^/api/ncoreiq/(.*)$",
+      "target": "/api/ncoreiq/$1",
+      "destination": "ncoreshift-python",
+      "authenticationType": "xsuaa",
+      "csrfProtection": true
+    },
+    {
+      "source": "^/do/logout$",
+      "logout": {
+        "logoutEndpoint": "/do/logout"
+      }
+    },
+    {
+      "source": "^/(.*)$",
+      "target": "/$1",
+      "localDir": "dist",
+      "authenticationType": "xsuaa"
+    }
+  ]
+}
