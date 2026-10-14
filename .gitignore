@@ -3,6 +3,8 @@ dist/
 *.js.map
 *.d.ts.map
 .env
+.env.*
+!.env.example
 .env.local
 .env.*.local
 *.sqlite
@@ -14,6 +16,14 @@ coverage/
 .DS_Store
 Thumbs.db
 .vscode/settings.json
+
+# Python runtime caches
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Repository archive artifacts
+*.zip
 
 # graphify-axet
 .graphify/
@@ -36,6 +46,8 @@ jest-agent-out.txt
 jest-srv-out.txt
 srv-ai-admin-test.txt
 lint-out.txt
+lint-*.txt
+*-errors.txt
 fix-parser.ps1
 write-parser.ps1
 write-test.ps1

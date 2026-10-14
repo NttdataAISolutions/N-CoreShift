@@ -1,9 +1,0 @@
-Error: Can't find a root directory while resolving a config file path.
-Provided path to resolve: agent/jest.config.cjs
-cwd: c:\N-Guard
-    at resolveConfigPath (c:\N-Guard\node_modules\jest-config\build\resolveConfigPath.js:123:11)
-    at readInitialOptions (c:\N-Guard\node_modules\jest-config\build\index.js:386:55)
-    at readConfig (c:\N-Guard\node_modules\jest-config\build\index.js:147:54)
-    at readConfigs (c:\N-Guard\node_modules\jest-config\build\index.js:424:32)
-    at runCLI (c:\N-Guard\node_modules\@jest\core\build\cli\index.js:152:29)
-    at Object.run (c:\N-Guard\node_modules\jest-cli\build\run.js:130:62)
