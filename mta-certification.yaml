@@ -1,0 +1,97 @@
+_schema-version: "3.3.0"
+ID: ncoreshift-certification
+version: 1.0.0
+description: "N-CoreShift - Certification deployment (N-CoreIQ path only)"
+
+parameters:
+  enable-parallel-deployments: true
+  ncoreiq-xsappname: ncoreiq-${org}-${space}
+
+modules:
+
+  - name: ncoreshift-python
+    type: python
+    path: backend
+    build-parameters:
+      builder: custom
+      commands: []
+      ignore:
+        - .env
+        - .env.*
+        - .env.example
+        - __pycache__/
+        - "**/__pycache__/"
+        - "**/__pycache__/**"
+        - "*.pyc"
+        - "**/*.pyc"
+        - .pytest_cache/
+        - tests/
+        - "*.db"
+        - "*.sqlite"
+        - "*.sqlite3"
+        - "*.log"
+        - coverage/
+        - htmlcov/
+        - uploads/
+        - generated-artifacts/
+        - "*.zip"
+        - "*.mtar"
+        - .vscode/
+        - .idea/
+    parameters:
+      buildpack: python_buildpack
+      memory: 512M
+      disk-quota: 1024M
+      instances: 1
+      health-check-type: http
+      health-check-http-endpoint: /api/health
+    properties:
+      PYTHON_ENV: production
+      NCOREIQ_AUTH_MODE: xsuaa
+      NCOREIQ_BASE_URL: https://ncoreiq.cfapps.us10.hana.ondemand.com
+    requires:
+      - name: ncoreshift-uaa
+    provides:
+      - name: ncoreshift-python-api
+        properties:
+          python-url: ${default-url}
+
+  - name: ncoreshift-app
+    type: approuter.nodejs
+    path: app
+    build-parameters:
+      builder: custom
+      commands: []
+      ignore:
+        - node_modules/
+        - .env
+    parameters:
+      memory: 256M
+      disk-quota: 512M
+      instances: 1
+      health-check-type: port
+    properties:
+      TENANT_HOST_PATTERN: "^(.*)-${default-uri}"
+    requires:
+      - name: ncoreshift-uaa
+      - name: ncoreshift-python-api
+        group: destinations
+        properties:
+          name: ncoreshift-python
+          url: ~{python-url}
+          forwardAuthToken: true
+
+resources:
+
+  - name: ncoreshift-uaa
+    type: org.cloudfoundry.managed-service
+    parameters:
+      service: xsuaa
+      service-plan: application
+      path: ./xs-security.json
+      config:
+        xsappname: ncoreshift-${org}-${space}
+        tenant-mode: shared
+        authorities:
+          - "$XSAPPNAME(application,${ncoreiq-xsappname}).NCoreIQ.Viewer"
+          - "$XSAPPNAME(application,${ncoreiq-xsappname}).NCoreIQ.Analyst"
