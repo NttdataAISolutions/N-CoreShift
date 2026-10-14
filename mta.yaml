@@ -122,7 +122,6 @@ modules:
       ignore:
         - node_modules/
         - .env
-        - dist/
     parameters:
       memory: 256M
       disk-quota: 512M
