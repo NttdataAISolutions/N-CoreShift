@@ -1,29 +1,6 @@
 """
-N-CoreShift — NCoreIQSourceProvider (Python runtime)
-
+N-CoreShift NCoreIQSourceProvider (Python runtime)
 Business logic for connected SAP source ingestion via N-CoreIQ.
-
-Responsibilities:
-  - connection test
-  - package discovery
-  - object preview (no source download)
-  - individual object import (metadata + complete source + deps)
-  - versioned refresh (creates new Object row; does not overwrite existing evidence)
-  - dependency import → ObjectDependency table
-  - bulk import strategy:
-      objects ≤ NCOREIQ_DIRECT_IMPORT_LIMIT → per-object direct fetch
-      objects > NCOREIQ_DIRECT_IMPORT_LIMIT → N-CoreIQ async extraction job
-
-Import threshold:
-  NCOREIQ_DIRECT_IMPORT_LIMIT = 20  (configurable via env var)
-  Objects above this count use POST /api/v1/repository/jobs (async extraction).
-  The threshold avoids sending many individual requests for large packages
-  while keeping small explicit-object imports simple and synchronous.
-
-Architecture decision (B.2):
-  Python = CURRENT runtime adapter
-  TypeScript NCoreIQSourceProvider = FUTURE agent/domain adapter
-  Both use the same contract. Neither performs Clean Core decisioning.
 """
 
 import hashlib
@@ -36,43 +13,24 @@ from uuid import uuid4
 
 from sqlalchemy.orm import Session
 
-from integrations.ncoreiq_client import NCoreIQClient, NCoreIQError
+from integrations.ncoreiq_client import ARTIFACT_MAX_BYTES, NCoreIQClient, NCoreIQError
 from models import Object, ObjectDependency, Project
 
 logger = logging.getLogger(__name__)
 
-# ── Direct import threshold ────────────────────────────────────────────────────
-# Objects ≤ this → per-object direct fetch (synchronous, low overhead)
-# Objects > this → N-CoreIQ async extraction job (POST /api/v1/repository/jobs)
-# Configurable via NCOREIQ_DIRECT_IMPORT_LIMIT env var.
-NCOREIQ_DIRECT_IMPORT_LIMIT: int = int(
-    os.getenv("NCOREIQ_DIRECT_IMPORT_LIMIT", "20")
-)
-
-# Contract version embedded in evidence provenance
+NCOREIQ_DIRECT_IMPORT_LIMIT: int = int(os.getenv("NCOREIQ_DIRECT_IMPORT_LIMIT", "20"))
 _CONTRACT_VERSION = "v1"
+_ARTIFACT_MAX_OBJECTS = 10_000
+_JSON_CONTENT_TYPES = ("application/json", "text/plain")
 
-
-# ── Job store abstraction ──────────────────────────────────────────────────────
 
 class NCoreIQJobStore:
-    """
-    In-memory import job store.
-
-    LOCAL DEVELOPMENT ONLY.
-    Replace with persistent store (database table or BTP Job Scheduling Service)
-    before deploying to a stateless production environment.
-
-    The abstraction isolates job-state management from router and provider logic.
-    """
+    """In-memory import job store. CLASSIFICATION: CERTIFICATION_ONLY"""
 
     def __init__(self):
         self._jobs: Dict[str, Dict[str, Any]] = {}
 
-    def create(self, upstream_job_id: Optional[str],
-               project_id: int,
-               objects_requested: int,
-               packages: List[str]) -> str:
+    def create(self, upstream_job_id, project_id, objects_requested, packages):
         local_id = str(uuid4())
         self._jobs[local_id] = {
             "localJobId": local_id,
@@ -84,43 +42,37 @@ class NCoreIQJobStore:
             "objectsImported": 0,
             "objectsFailed": 0,
             "errors": [],
+            "resultSummary": None,
+            "resultStatus": None,
+            "warnings": [],
+            "artifactStatus": None,
             "createdAt": datetime.now(timezone.utc).isoformat(),
             "completedAt": None,
         }
         return local_id
 
-    def update(self, local_id: str, **kwargs: Any) -> None:
+    def update(self, local_id, **kwargs):
         if local_id in self._jobs:
             self._jobs[local_id].update(kwargs)
 
-    def get(self, local_id: str) -> Optional[Dict[str, Any]]:
+    def get(self, local_id):
         return self._jobs.get(local_id)
 
-    def set_status(self, local_id: str, status: str) -> None:
+    def set_status(self, local_id, status):
         if local_id in self._jobs:
             self._jobs[local_id]["status"] = status
             if status in ("COMPLETED", "PARTIAL", "FAILED", "CANCELLED"):
                 self._jobs[local_id]["completedAt"] = datetime.now(timezone.utc).isoformat()
 
 
-# Singleton job store (per-process, local dev only)
 _job_store = NCoreIQJobStore()
 
 
 def get_job_store() -> NCoreIQJobStore:
-    """Return the process-level job store. Replace with persistent store in production."""
     return _job_store
 
 
-# ── Source text helpers ────────────────────────────────────────────────────────
-
 def extract_source_text(source_data: Dict[str, Any]) -> str:
-    """
-    Extract canonical source text from N-CoreIQ RepositoryObjectSource.
-    Joins all component lines in component order, within each component in
-    line_no order, separated by newline.
-    Matches Section 8 SHA-256 canonical algorithm.
-    """
     components = source_data.get("components", [])
     all_lines: List[str] = []
     for component in components:
@@ -131,49 +83,25 @@ def extract_source_text(source_data: Dict[str, Any]) -> str:
 
 
 def compute_source_hash(source_text: str) -> str:
-    """
-    SHA-256(source_text.encode('utf-8')) — canonical algorithm from contract Section 8.
-    Used when N-CoreIQ does not provide sha256.
-    """
     return hashlib.sha256(source_text.encode("utf-8")).hexdigest()
 
 
 def get_source_hash(source_data: Dict[str, Any], source_text: str) -> Tuple[str, bool]:
-    """
-    Return (hash_hex, ncoreiq_provided).
-    If N-CoreIQ provided sha256, use it directly (ncoreiq_provided=True).
-    Otherwise compute locally (ncoreiq_provided=False).
-    """
     ncoreiq_hash = source_data.get("sha256", "").strip()
     if ncoreiq_hash:
         return ncoreiq_hash, True
     return compute_source_hash(source_text), False
 
 
-# ── NCoreIQSourceProvider ─────────────────────────────────────────────────────
 
 class NCoreIQSourceProvider:
-    """
-    Source provider for connected SAP ingestion via N-CoreIQ.
+    """Source provider for connected SAP ingestion via N-CoreIQ."""
 
-    The provider is the sole place where N-CoreIQ business logic lives.
-    The router calls this provider; it does not own N-CoreIQ HTTP mechanics.
-
-    A technical dependency imported here is EVIDENCE only.
-    It is not a Clean Core disposition.
-    """
-
-    def __init__(self, client: NCoreIQClient, job_store: Optional[NCoreIQJobStore] = None):
+    def __init__(self, client: NCoreIQClient, job_store=None):
         self._client = client
         self._job_store = job_store or get_job_store()
 
-    # ── Connection test ───────────────────────────────────────────────────────
-
-    async def test_connection(self) -> Dict[str, Any]:
-        """
-        Test N-CoreIQ → SAP connectivity.
-        Returns normalized result. Never exposes credentials or tokens.
-        """
+    async def test_connection(self):
         try:
             data = await self._client.ping()
             return {
@@ -187,37 +115,23 @@ class NCoreIQSourceProvider:
             }
         except NCoreIQError as exc:
             return {
-                "connected": False,
-                "sourceProvider": "NCOREIQ",
-                "systemId": None,
-                "client": None,
-                "sapRelease": None,
-                "upstreamConnectionState": None,
-                "error": str(exc),
+                "connected": False, "sourceProvider": "NCOREIQ",
+                "systemId": None, "client": None, "sapRelease": None,
+                "upstreamConnectionState": None, "error": str(exc),
             }
         except Exception as exc:
             logger.warning("Unexpected error in test_connection: %s", type(exc).__name__)
             return {
-                "connected": False,
-                "sourceProvider": "NCOREIQ",
+                "connected": False, "sourceProvider": "NCOREIQ",
                 "systemId": None, "client": None, "sapRelease": None,
-                "upstreamConnectionState": None,
-                "error": "N-CoreIQ is unavailable",
+                "upstreamConnectionState": None, "error": "N-CoreIQ is unavailable",
             }
 
-    # ── Package discovery ─────────────────────────────────────────────────────
-
-    async def list_packages(self, package: str,
-                             include_subpackages: bool = True) -> Dict[str, Any]:
+    async def list_packages(self, package, include_subpackages=True):
         data = await self._client.list_packages(package, include_subpackages=include_subpackages)
         return {"packages": data.get("packages", []), "root_package": data.get("root_package")}
 
-    # ── Object preview ────────────────────────────────────────────────────────
-
-    async def preview_objects(self, packages: List[str],
-                               include_subpackages: bool = True,
-                               max_results: int = 200) -> Dict[str, Any]:
-        """Search for objects — does NOT download source. Efficient preview."""
+    async def preview_objects(self, packages, include_subpackages=True, max_results=200):
         data = await self._client.search_objects(
             packages, include_subpackages=include_subpackages, max_results=max_results
         )
@@ -227,10 +141,8 @@ class NCoreIQSourceProvider:
             "truncated": data.get("truncated", False),
         }
 
-    # ── Resolve or create project ─────────────────────────────────────────────
-
     @staticmethod
-    def resolve_or_create_project(project_name: str, db: Session) -> int:
+    def resolve_or_create_project(project_name, db):
         proj = db.query(Project).filter(Project.name == project_name).first()
         if proj:
             return proj.id
@@ -240,53 +152,25 @@ class NCoreIQSourceProvider:
         db.refresh(new_proj)
         return new_proj.id
 
-    # ── Individual object import ──────────────────────────────────────────────
-
-    async def import_object(
-        self,
-        project_id: int,
-        obj_type: str,
-        obj_name: str,
-        friendly_type: str,
-        package: str,
-        db: Session,
-        ncoreiq_base_url: str,
-        refresh: bool = False,
-    ) -> Optional[int]:
+    async def import_object(self, project_id, obj_type, obj_name, friendly_type,
+                             package, db, ncoreiq_base_url, refresh=False):
         """
-        Import a single SAP object from N-CoreIQ.
-
+        Import a single SAP object from N-CoreIQ via individual API calls.
         Complete source (no max_lines). Truncated source is rejected.
-        Persists N-CoreIQ provenance in ncoreiq_metadata_json.
-
-        Versioning:
-          - First import: creates Object row (object_version=1, is_latest_version=True).
-          - Explicit refresh: creates NEW Object row (object_version=N+1),
-            marks previous version is_latest_version=False.
-            Previous source_code is preserved for reproducibility.
-          - NOT refresh (re-import same object): if existing row has NO analysis
-            results, it is updated in-place (safe — no evidence to preserve).
-            If it has analysis results, treat as refresh (create new version).
-
-        Returns the new object_id, or None on failure.
+        Returns new object_id, or None on failure.
         """
-        # Fetch complete source — NO max_lines
         try:
             source_data = await self._client.get_source(obj_type, obj_name)
         except NCoreIQError as exc:
             logger.warning("Failed to fetch source for %s/%s: %s", obj_type, obj_name, exc)
             return None
-
         if source_data.get("truncated"):
-            logger.warning("Source for %s/%s is truncated — rejecting (complete source required)", obj_type, obj_name)
+            logger.warning("Source for %s/%s is truncated — rejecting", obj_type, obj_name)
             return None
-
         source_text = extract_source_text(source_data)
         lines_of_code = source_data.get("returned_lines", 0)
         source_hash, ncoreiq_hash_provided = get_source_hash(source_data, source_text)
         retrieved_at = datetime.now(timezone.utc).isoformat()
-
-        # Fetch metadata for SAP provenance
         sap_sid = source_data.get("system_id", "")
         sap_client = source_data.get("client", "")
         sap_release = ""
@@ -296,24 +180,46 @@ class NCoreIQSourceProvider:
             if not package:
                 package = meta.get("package", "")
         except NCoreIQError:
-            pass  # metadata failure does not prevent source import
+            pass
+        return self._persist_object(
+            project_id=project_id, obj_type=obj_type, obj_name=obj_name,
+            friendly_type=friendly_type, package=package, source_text=source_text,
+            lines_of_code=lines_of_code, source_hash=source_hash,
+            ncoreiq_hash_provided=ncoreiq_hash_provided,
+            source_sha256=source_data.get("sha256", ""), sap_sid=sap_sid,
+            sap_client=sap_client, sap_release=sap_release,
+            ncoreiq_base_url=ncoreiq_base_url, retrieved_at=retrieved_at,
+            refresh=refresh, db=db,
+        )
 
-        # Check for existing version
+    @staticmethod
+    def _build_metadata_json(sap_sid, sap_client, sap_release, ncoreiq_base_url,
+                              ncoreiq_sha256, ncoreiq_hash_provided, retrieved_at,
+                              version, refreshed_from_id):
+        return json.dumps({
+            "provider": "NCOREIQ", "contract_version": _CONTRACT_VERSION,
+            "sap_sid": sap_sid, "sap_client": sap_client, "sap_release": sap_release,
+            "ncoreiq_base_url": ncoreiq_base_url, "ncoreiq_sha256": ncoreiq_sha256,
+            "ncoreiq_hash_provided": ncoreiq_hash_provided, "retrieved_at": retrieved_at,
+            "object_version": version, "refreshed_from_id": refreshed_from_id,
+        })
+
+    def _persist_object(self, project_id, obj_type, obj_name, friendly_type, package,
+                        source_text, lines_of_code, source_hash, ncoreiq_hash_provided,
+                        source_sha256, sap_sid, sap_client, sap_release,
+                        ncoreiq_base_url, retrieved_at, refresh, db):
+        """Shared persistence for direct-import and artifact-import paths. Never logs source."""
         existing = (
             db.query(Object)
             .filter(
                 Object.project_id == project_id,
                 Object.object_name == obj_name,
                 Object.is_latest_version == True,  # noqa: E712
-            )
-            .first()
+            ).first()
         )
-
         if existing and not refresh:
-            # Has analysis results? → treat as implicit refresh
             has_analyses = len(existing.analysis_results) > 0
             if not has_analyses:
-                # Safe to update in-place (no evidence to preserve)
                 existing.source_code = source_text
                 existing.lines_of_code = lines_of_code
                 existing.source_code_version = source_hash
@@ -322,98 +228,61 @@ class NCoreIQSourceProvider:
                 existing.provider = "NCOREIQ"
                 existing.ncoreiq_metadata_json = self._build_metadata_json(
                     sap_sid, sap_client, sap_release, ncoreiq_base_url,
-                    source_data.get("sha256", ""), ncoreiq_hash_provided,
-                    retrieved_at, existing.object_version, None,
+                    source_sha256, ncoreiq_hash_provided, retrieved_at,
+                    existing.object_version, None,
                 )
                 db.commit()
                 return existing.id
-
-            # Has analyses → create new version
             refresh = True
-
-        parent_id: Optional[int] = None
-        new_version: int = 1
-
+        parent_id = None
+        new_version = 1
         if existing and refresh:
-            # Mark existing as superseded — NEVER DELETE source_code
             existing.is_latest_version = False
             db.flush()
             parent_id = existing.id
             new_version = (existing.object_version or 1) + 1
-
         ncoreiq_meta = self._build_metadata_json(
             sap_sid, sap_client, sap_release, ncoreiq_base_url,
-            source_data.get("sha256", ""), ncoreiq_hash_provided,
-            retrieved_at, new_version, parent_id,
+            source_sha256, ncoreiq_hash_provided, retrieved_at, new_version, parent_id,
         )
-
         new_obj = Object(
-            project_id=project_id,
-            object_name=obj_name,
-            object_type=friendly_type or obj_type,
-            package=package,
-            source_code=source_text,
-            lines_of_code=lines_of_code,
-            source_code_version=source_hash,
-            provider="NCOREIQ",
-            ncoreiq_metadata_json=ncoreiq_meta,
-            object_version=new_version,
-            is_latest_version=True,
-            parent_object_id=parent_id,
+            project_id=project_id, object_name=obj_name,
+            object_type=friendly_type or obj_type, package=package,
+            source_code=source_text, lines_of_code=lines_of_code,
+            source_code_version=source_hash, provider="NCOREIQ",
+            ncoreiq_metadata_json=ncoreiq_meta, object_version=new_version,
+            is_latest_version=True, parent_object_id=parent_id,
         )
         db.add(new_obj)
         db.commit()
         db.refresh(new_obj)
         return new_obj.id
 
-    @staticmethod
-    def _build_metadata_json(
-        sap_sid: str, sap_client: str, sap_release: str,
-        ncoreiq_base_url: str, ncoreiq_sha256: str, ncoreiq_hash_provided: bool,
-        retrieved_at: str, version: int, refreshed_from_id: Optional[int],
-    ) -> str:
-        return json.dumps({
-            "provider": "NCOREIQ",
-            "contract_version": _CONTRACT_VERSION,
-            "sap_sid": sap_sid,
-            "sap_client": sap_client,
-            "sap_release": sap_release,
-            "ncoreiq_base_url": ncoreiq_base_url,
-            "ncoreiq_sha256": ncoreiq_sha256,
-            "ncoreiq_hash_provided": ncoreiq_hash_provided,
-            "retrieved_at": retrieved_at,
-            "object_version": version,
-            "refreshed_from_id": refreshed_from_id,
-        })
-
-    # ── Dependency import ─────────────────────────────────────────────────────
-
-    async def import_dependencies(
-        self, project_id: int, object_id: int,
-        obj_type: str, obj_name: str, db: Session,
-    ) -> int:
-        """
-        Import direct dependencies for an object.
-        Dependencies are EVIDENCE only — not Clean Core verdicts.
-        Returns count of imported dependency records.
-        """
+    async def import_dependencies(self, project_id, object_id, obj_type, obj_name, db):
+        """Import direct dependencies via N-CoreIQ API. Returns count."""
         try:
             data = await self._client.get_dependencies(obj_type, obj_name)
         except NCoreIQError as exc:
-            logger.warning("Failed to fetch dependencies for %s/%s: %s", obj_type, obj_name, exc)
+            logger.warning("Failed to fetch deps for %s/%s: %s", obj_type, obj_name, exc)
             return 0
+        return self._persist_dependencies(
+            project_id, object_id, obj_type, obj_name,
+            data.get("relationships", []), db,
+        )
 
-        relationships = data.get("relationships", [])
+    @staticmethod
+    def _persist_dependencies(project_id, object_id, obj_type, obj_name, relationships, db):
+        """Shared dependency persistence for API and artifact paths."""
         imported = 0
         for rel in relationships:
+            if not isinstance(rel, dict):
+                continue
             target_name = rel.get("target_object_name", "")
             if not target_name:
                 continue
             dep = ObjectDependency(
-                project_id=project_id,
-                source_object_id=object_id,
-                source_object_name=obj_name,
-                source_object_type=obj_type,
+                project_id=project_id, source_object_id=object_id,
+                source_object_name=obj_name, source_object_type=obj_type,
                 target_object_name=target_name,
                 target_object_type=rel.get("target_object_type", ""),
                 relationship_type=rel.get("relationship_type", ""),
@@ -430,38 +299,17 @@ class NCoreIQSourceProvider:
             db.commit()
         return imported
 
-    # ── Bulk import (direct path: ≤ NCOREIQ_DIRECT_IMPORT_LIMIT objects) ──────
-
-    async def start_direct_import(
-        self,
-        project_id: int,
-        objects_to_import: List[Dict[str, Any]],
-        ncoreiq_base_url: str,
-        packages: List[str],
-        db: Session,
-        include_dependencies: bool = True,
-    ) -> str:
-        """
-        Per-object direct import for small object sets (≤ NCOREIQ_DIRECT_IMPORT_LIMIT).
-        Runs as a background task. Returns local job ID.
-        """
+    async def start_direct_import(self, project_id, objects_to_import, ncoreiq_base_url,
+                                   packages, db, include_dependencies=True):
+        """Per-object direct import for small sets. Returns local job ID."""
         local_id = self._job_store.create(
-            upstream_job_id=None,
-            project_id=project_id,
-            objects_requested=len(objects_to_import),
-            packages=packages,
+            upstream_job_id=None, project_id=project_id,
+            objects_requested=len(objects_to_import), packages=packages,
         )
-        # Caller must run _run_direct_import as a background task
         return local_id
 
-    async def run_direct_import(
-        self,
-        local_job_id: str,
-        project_id: int,
-        objects_to_import: List[Dict[str, Any]],
-        ncoreiq_base_url: str,
-        include_dependencies: bool = True,
-    ) -> None:
+    async def run_direct_import(self, local_job_id, project_id, objects_to_import,
+                                 ncoreiq_base_url, include_dependencies=True):
         """Background task body for direct per-object import."""
         from database import SessionLocal
         db = SessionLocal()
@@ -470,12 +318,12 @@ class NCoreIQSourceProvider:
                 obj_type = obj.get("sap_object_type", "PROG")
                 obj_name = obj.get("object_name", "")
                 if not obj_name:
-                    self._job_store.update(local_job_id, objectsFailed=self._job_store.get(local_job_id)["objectsFailed"] + 1)
+                    cur = self._job_store.get(local_job_id)
+                    self._job_store.update(local_job_id, objectsFailed=cur["objectsFailed"] + 1)
                     continue
                 object_id = await self.import_object(
                     project_id, obj_type, obj_name,
-                    obj.get("friendly_type", obj_type),
-                    obj.get("package", ""),
+                    obj.get("friendly_type", obj_type), obj.get("package", ""),
                     db, ncoreiq_base_url,
                 )
                 job = self._job_store.get(local_job_id)
@@ -490,8 +338,7 @@ class NCoreIQSourceProvider:
                         try:
                             await self.import_dependencies(project_id, object_id, obj_type, obj_name, db)
                         except Exception:
-                            pass  # dependency failure does not fail the object import
-
+                            pass
             job = self._job_store.get(local_job_id)
             if job["objectsFailed"] == 0:
                 self._job_store.set_status(local_job_id, "COMPLETED")
@@ -505,48 +352,156 @@ class NCoreIQSourceProvider:
         finally:
             db.close()
 
-    # ── Bulk import (extraction job path: > NCOREIQ_DIRECT_IMPORT_LIMIT) ─────
+    async def _import_object_from_artifact_data(
+            self, project_id, obj_type, obj_name, package,
+            source_data, metadata_data, ncoreiq_base_url, db):
+        """
+        Import a single object using pre-fetched data from the artifact.
+        Reuses _persist_object() -- no live N-CoreIQ API calls are made.
+        Truncated source is rejected. Source evidence is NEVER logged.
+        Returns object_id or None on failure.
+        """
+        if not source_data or not isinstance(source_data, dict):
+            logger.warning("Artifact object %s/%s has no source data", obj_type, obj_name)
+            return None
+        if source_data.get("truncated"):
+            logger.warning("Artifact source for %s/%s is truncated -- rejecting", obj_type, obj_name)
+            return None
+        source_text = extract_source_text(source_data)
+        lines_of_code = source_data.get("returned_lines", 0)
+        source_hash, ncoreiq_hash_provided = get_source_hash(source_data, source_text)
+        retrieved_at = datetime.now(timezone.utc).isoformat()
+        sap_sid = source_data.get("system_id", "")
+        sap_client = source_data.get("client", "")
+        sap_release = ""
+        if metadata_data and isinstance(metadata_data, dict):
+            sap_release = metadata_data.get("sap_release", "")
+            if not package:
+                package = metadata_data.get("package", "") or ""
+        return self._persist_object(
+            project_id=project_id, obj_type=obj_type, obj_name=obj_name,
+            friendly_type=obj_type, package=package, source_text=source_text,
+            lines_of_code=lines_of_code, source_hash=source_hash,
+            ncoreiq_hash_provided=ncoreiq_hash_provided,
+            source_sha256=source_data.get("sha256", ""), sap_sid=sap_sid,
+            sap_client=sap_client, sap_release=sap_release,
+            ncoreiq_base_url=ncoreiq_base_url, retrieved_at=retrieved_at,
+            refresh=False, db=db,
+        )
 
-    async def start_extraction_job_import(
-        self,
-        project_id: int,
-        objects_to_import: List[Dict[str, Any]],
-        packages: List[str],
-    ) -> Tuple[str, str]:
+    async def _process_json_artifact(
+            self, local_job_id, artifact_bytes, content_type,
+            project_id, ncoreiq_base_url, db):
         """
-        Start N-CoreIQ async extraction job for large imports.
-        Returns (local_job_id, upstream_job_id).
+        Parse a JSON artifact and import all successfully extracted objects.
+
+        Artifact JSON format (derived from contract types in agent/src/ncoreiq/types.ts):
+          {
+            "extraction_id": "...",
+            "objects": [
+              {
+                "sap_object_type": "PROG", "object_name": "ZPROG_1", "package": "ZTEST",
+                "success": true, "error_message": null,
+                "metadata": { <RepositoryObjectMetadata> },
+                "source":   { <RepositoryObjectSource with components[]> },
+                "dependencies": { <DirectDependenciesResponse with relationships[]> }
+              }
+            ]
+          }
+
+        Rejects: non-JSON content type, malformed JSON, missing objects array,
+        oversized object count. Source evidence is NEVER logged.
         """
+        ct_lower = (content_type or "").lower().split(";")[0].strip()
+        if not any(ct_lower.startswith(jct) for jct in _JSON_CONTENT_TYPES):
+            raise ValueError(
+                f"Unsupported artifact content-type: {content_type!r}. Expected application/json."
+            )
+        try:
+            payload = json.loads(artifact_bytes.decode("utf-8"))
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            # Do NOT log artifact_bytes -- may contain source evidence
+            raise ValueError(f"Artifact JSON parse error: {type(exc).__name__}") from exc
+        if not isinstance(payload, dict):
+            raise ValueError("Artifact root must be a JSON object")
+        objects = payload.get("objects")
+        if not isinstance(objects, list):
+            raise ValueError("Artifact missing required 'objects' array -- invalid schema")
+        if len(objects) > _ARTIFACT_MAX_OBJECTS:
+            raise ValueError(
+                f"Artifact object count {len(objects)} exceeds limit {_ARTIFACT_MAX_OBJECTS}"
+            )
+        for art_obj in objects:
+            if not isinstance(art_obj, dict):
+                cur = self._job_store.get(local_job_id)
+                self._job_store.update(local_job_id, objectsFailed=cur["objectsFailed"] + 1)
+                continue
+            if not art_obj.get("success", False):
+                cur = self._job_store.get(local_job_id)
+                self._job_store.update(local_job_id, objectsFailed=cur["objectsFailed"] + 1)
+                continue
+            obj_type = art_obj.get("sap_object_type", "PROG")
+            obj_name = art_obj.get("object_name", "")
+            if not obj_name:
+                cur = self._job_store.get(local_job_id)
+                self._job_store.update(local_job_id, objectsFailed=cur["objectsFailed"] + 1)
+                continue
+            object_id = await self._import_object_from_artifact_data(
+                project_id=project_id,
+                obj_type=obj_type, obj_name=obj_name,
+                package=art_obj.get("package", ""),
+                source_data=art_obj.get("source"),
+                metadata_data=art_obj.get("metadata"),
+                ncoreiq_base_url=ncoreiq_base_url, db=db,
+            )
+            cur = self._job_store.get(local_job_id)
+            if object_id:
+                self._job_store.update(local_job_id, objectsImported=cur["objectsImported"] + 1)
+                deps_data = art_obj.get("dependencies")
+                if deps_data and isinstance(deps_data, dict):
+                    try:
+                        rels = deps_data.get("relationships", [])
+                        if isinstance(rels, list):
+                            self._persist_dependencies(
+                                project_id, object_id, obj_type, obj_name, rels, db
+                            )
+                    except Exception:
+                        pass
+            else:
+                self._job_store.update(local_job_id, objectsFailed=cur["objectsFailed"] + 1)
+
+    async def start_extraction_job_import(self, project_id, objects_to_import, packages):
+        """Start N-CoreIQ async extraction job. Returns (local_job_id, upstream_job_id)."""
         extraction_objects = [
             {"object_type": o.get("sap_object_type", "PROG"), "object_name": o.get("object_name", "")}
             for o in objects_to_import if o.get("object_name")
         ]
         result = await self._client.create_extraction_job(
-            extraction_objects, source_max_lines=None  # complete source
+            extraction_objects, source_max_lines=None
         )
         upstream_job_id = result.get("job_id", str(uuid4()))
         local_id = self._job_store.create(
-            upstream_job_id=upstream_job_id,
-            project_id=project_id,
-            objects_requested=len(extraction_objects),
-            packages=packages,
+            upstream_job_id=upstream_job_id, project_id=project_id,
+            objects_requested=len(extraction_objects), packages=packages,
         )
         return local_id, upstream_job_id
 
-    async def poll_extraction_job(
-        self,
-        local_job_id: str,
-        ncoreiq_base_url: str,
-        db: Session,
-    ) -> Dict[str, Any]:
+    async def poll_extraction_job(self, local_job_id, ncoreiq_base_url, db):
         """
-        Poll N-CoreIQ extraction job status and import completed objects.
-        Call this from a background polling task.
+        Poll N-CoreIQ extraction job status and process completed artifact.
+
+        Job completion semantics (certified contract):
+          SUCCEEDED + COMPLETED            -> artifact processed
+          SUCCEEDED + COMPLETED_WITH_ERRORS -> artifact processed; partial result
+          SUCCEEDED + FAILED               -> no artifact imported as successful result
+          FAILED / CANCELLED               -> set local status accordingly
+
+        Summary consumed from result_data["summary"] (certified contract).
+        result_data["results"] is NEVER used -- absent from certified contract.
         """
         job = self._job_store.get(local_job_id)
         if not job:
             return {"error": "JOB_NOT_FOUND"}
-
         upstream_id = job.get("upstreamJobId")
         if not upstream_id:
             return job
@@ -554,48 +509,111 @@ class NCoreIQSourceProvider:
         status_data = await self._client.get_job_status(upstream_id)
         upstream_status = status_data.get("status", "RUNNING")
 
-        if upstream_status in ("SUCCEEDED",):
-            # Retrieve result and import objects
+        if upstream_status == "SUCCEEDED":
+            # 1. Retrieve result -- certified contract requires summary field
             try:
                 result_data = await self._client.get_job_result(upstream_id)
-                succeeded_objects = [
-                    r for r in result_data.get("results", []) if r.get("success")
-                ]
-                for obj_result in succeeded_objects:
-                    obj_type = obj_result.get("object_type", "PROG")
-                    obj_name = obj_result.get("object_name", "")
-                    if obj_name:
-                        object_id = await self.import_object(
-                            job["projectId"], obj_type, obj_name,
-                            obj_type, "", db, ncoreiq_base_url,
-                        )
-                        cur = self._job_store.get(local_job_id)
-                        if object_id:
-                            self._job_store.update(local_job_id, objectsImported=cur["objectsImported"] + 1)
-                            try:
-                                await self.import_dependencies(job["projectId"], object_id, obj_type, obj_name, db)
-                            except Exception:
-                                pass
-                        else:
-                            self._job_store.update(local_job_id, objectsFailed=cur["objectsFailed"] + 1)
-            except Exception as exc:
-                logger.error("Failed to import extraction job results: %s", type(exc).__name__)
+            except NCoreIQError as exc:
+                logger.error("Failed to retrieve job result: %s", type(exc).__name__)
+                errors = list((self._job_store.get(local_job_id) or {}).get("errors", []))
+                errors.append(f"Result retrieval failed: {type(exc).__name__}")
+                self._job_store.update(local_job_id, errors=errors)
                 self._job_store.set_status(local_job_id, "FAILED")
                 return self._job_store.get(local_job_id)
 
-            cur = self._job_store.get(local_job_id)
-            if cur["objectsFailed"] == 0:
-                self._job_store.set_status(local_job_id, "COMPLETED")
-            elif cur["objectsImported"] == 0:
+            # 2. Validate summary -- NEVER fall back to results[]
+            summary = result_data.get("summary")
+            if not summary or not isinstance(summary, dict):
+                logger.error(
+                    "Job result missing required summary field -- failing closed "
+                    "(legacy results[] is not accepted by this consumer)"
+                )
+                errors = list((self._job_store.get(local_job_id) or {}).get("errors", []))
+                errors.append("Result summary missing or invalid")
+                self._job_store.update(local_job_id, errors=errors)
                 self._job_store.set_status(local_job_id, "FAILED")
-            else:
-                self._job_store.set_status(local_job_id, "PARTIAL")
+                return self._job_store.get(local_job_id)
+
+            result_status = summary.get("status", "")
+            if not result_status:
+                logger.error("Summary missing status field")
+                errors = list((self._job_store.get(local_job_id) or {}).get("errors", []))
+                errors.append("Summary status field missing")
+                self._job_store.update(local_job_id, errors=errors)
+                self._job_store.set_status(local_job_id, "FAILED")
+                return self._job_store.get(local_job_id)
+
+            # 3. Sanitize warnings -- never treat as executable content
+            raw_warnings = summary.get("warnings", [])
+            safe_warnings = [
+                str(w)[:500]
+                for w in (raw_warnings if isinstance(raw_warnings, list) else [])
+                if w is not None
+            ]
+            self._job_store.update(
+                local_job_id,
+                resultSummary=summary,
+                resultStatus=result_status,
+                warnings=safe_warnings,
+                objectsRequested=summary.get(
+                    "requested_object_count", job.get("objectsRequested", 0)
+                ),
+            )
+
+            # 4. FAILED result_status -- do not import any artifact evidence
+            if result_status == "FAILED":
+                logger.warning("Extraction result_status=FAILED -- no artifact imported")
+                self._job_store.set_status(local_job_id, "FAILED")
+                return self._job_store.get(local_job_id)
+
+            # 5. COMPLETED or COMPLETED_WITH_ERRORS -- download and process artifact
+            if result_status in ("COMPLETED", "COMPLETED_WITH_ERRORS"):
+                try:
+                    artifact_bytes, content_type = await self._client.get_job_artifact(upstream_id)
+                    self._job_store.update(local_job_id, artifactStatus="DOWNLOADED")
+                except (NCoreIQError, ValueError) as exc:
+                    logger.error("Artifact download failed: %s", type(exc).__name__)
+                    errors = list((self._job_store.get(local_job_id) or {}).get("errors", []))
+                    errors.append(f"Artifact download failed: {type(exc).__name__}")
+                    self._job_store.update(local_job_id, errors=errors, artifactStatus="FAILED")
+                    self._job_store.set_status(local_job_id, "FAILED")
+                    return self._job_store.get(local_job_id)
+
+                try:
+                    await self._process_json_artifact(
+                        local_job_id, artifact_bytes, content_type,
+                        job["projectId"], ncoreiq_base_url, db,
+                    )
+                    self._job_store.update(local_job_id, artifactStatus="IMPORTED")
+                except Exception as exc:
+                    logger.error("Artifact processing failed: %s", type(exc).__name__)
+                    errors = list((self._job_store.get(local_job_id) or {}).get("errors", []))
+                    errors.append(f"Artifact processing failed: {type(exc).__name__}")
+                    self._job_store.update(local_job_id, errors=errors, artifactStatus="FAILED")
+                    self._job_store.set_status(local_job_id, "FAILED")
+                    return self._job_store.get(local_job_id)
+
+            # 6. Determine final local status
+            cur = self._job_store.get(local_job_id)
+            if result_status == "COMPLETED_WITH_ERRORS":
+                # Partial evidence -- never report as fully complete
+                if cur["objectsImported"] > 0:
+                    self._job_store.set_status(local_job_id, "PARTIAL")
+                else:
+                    self._job_store.set_status(local_job_id, "FAILED")
+            elif result_status == "COMPLETED":
+                if cur["objectsFailed"] == 0:
+                    self._job_store.set_status(local_job_id, "COMPLETED")
+                elif cur["objectsImported"] == 0:
+                    self._job_store.set_status(local_job_id, "FAILED")
+                else:
+                    self._job_store.set_status(local_job_id, "PARTIAL")
 
         elif upstream_status in ("FAILED", "CANCELLED"):
             self._job_store.set_status(local_job_id, upstream_status)
 
         return self._job_store.get(local_job_id)
 
-    def get_job_status(self, local_job_id: str) -> Optional[Dict[str, Any]]:
+    def get_job_status(self, local_job_id):
         """Return current job state."""
         return self._job_store.get(local_job_id)

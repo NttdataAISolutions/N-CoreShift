@@ -26,7 +26,7 @@ Architecture decision:
 
 import logging
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 import httpx
 
@@ -56,6 +56,10 @@ _DEFAULT_TIMEOUT = 30.0
 _SOURCE_TIMEOUT = 60.0
 # Extended timeout for extraction jobs
 _JOB_TIMEOUT = 30.0
+# Extended timeout for artifact download (potentially large binary/JSON payload)
+_ARTIFACT_TIMEOUT = 120.0
+# Maximum artifact response size (50 MB). Enforced before parsing.
+ARTIFACT_MAX_BYTES = 50 * 1024 * 1024
 
 
 class NCoreIQError(Exception):
@@ -309,3 +313,65 @@ class NCoreIQClient:
         """GET /api/v1/repository/jobs/{job_id}/result"""
         path = JOB_RESULT_PATH.format(job_id=job_id)
         return await self._get(path)
+
+    # ── Section 7-M: Artifact Download ────────────────────────────────────────
+
+    async def get_job_artifact(self, job_id: str) -> Tuple[bytes, str]:
+        """
+        GET /api/v1/repository/jobs/{job_id}/artifact
+
+        Returns (artifact_bytes, content_type).
+
+        Requirements:
+        - GET only — no write path.
+        - Uses existing XSUAA bearer-token flow (_get_bearer).
+        - Bounded timeout (_ARTIFACT_TIMEOUT).
+        - Verifies HTTP status (raise_for_status).
+        - Preserves Content-Type from response for caller validation.
+        - Enforces ARTIFACT_MAX_BYTES hard limit.
+        - Artifact body is NEVER logged — it contains source evidence.
+        - Token/Authorization header is NEVER logged.
+        """
+        path = JOB_ARTIFACT_PATH.format(job_id=job_id)
+        url = f"{self._base_url}{path}"
+        bearer = await self._get_bearer()
+        # Accept JSON and ZIP artifacts; do not restrict to one format so the
+        # caller can validate the actual content-type received.
+        headers = {
+            "Accept": "application/json, application/zip, application/octet-stream",
+        }
+        if bearer:
+            headers["Authorization"] = f"Bearer {bearer}"
+            # Token value is NEVER written to any log.
+        try:
+            async with httpx.AsyncClient(timeout=_ARTIFACT_TIMEOUT) as client:
+                resp = await client.get(url, headers=headers)
+                resp.raise_for_status()
+                # Enforce size limit via Content-Length before reading body
+                cl_header = resp.headers.get("content-length")
+                if cl_header is not None:
+                    try:
+                        cl_value = int(cl_header)
+                        if cl_value > ARTIFACT_MAX_BYTES:
+                            raise ValueError(
+                                f"Artifact Content-Length {cl_value} exceeds "
+                                f"limit {ARTIFACT_MAX_BYTES}"
+                            )
+                    except (ValueError, TypeError) as size_exc:
+                        if "exceeds limit" in str(size_exc):
+                            raise
+                # Read body and enforce size limit on actual bytes
+                body = resp.content
+                if len(body) > ARTIFACT_MAX_BYTES:
+                    raise ValueError(
+                        f"Artifact body size {len(body)} exceeds limit {ARTIFACT_MAX_BYTES}"
+                    )
+                content_type = resp.headers.get("content-type", "application/octet-stream")
+                # Artifact body is NOT logged here — it contains source evidence.
+                return body, content_type
+        except (NCoreIQError, NCoreIQTimeoutError, NCoreIQUnavailableError):
+            raise
+        except ValueError:
+            raise
+        except Exception as exc:
+            raise self._normalize_error(exc) from None
