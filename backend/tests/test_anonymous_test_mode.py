@@ -15,6 +15,7 @@ Scenarios (per gate Step 11):
   8. Production xs-app.json still requires XSUAA.
   9. Test xs-app config uses authenticationType: none.
   10. Test descriptor uses separate app names.
+  11. Production xsuaa routes select corporate IdP 'sap.custom' (Gate 0E10-LOGIN-R1).
 """
 
 import json
@@ -438,3 +439,51 @@ class Test10_TestMtaUsesSeparateAppNames:
         xsuaa_resources = [r for r in mta.get("resources", []) if r["name"] == "ncoreshift-uaa"]
         assert len(xsuaa_resources) == 1
         assert xsuaa_resources[0]["type"] == "org.cloudfoundry.existing-service"
+
+
+# ══════════════════════════════════════════════════════════════════════════
+# 11. Production xsuaa routes select corporate IdP 'sap.custom'
+#     (Gate 0E10-LOGIN-R1 repair)
+# ══════════════════════════════════════════════════════════════════════════
+
+
+class Test11_LoginR1IdentityProviderSelection:
+    EXPECTED_IDENTITY_PROVIDER = "sap.custom"
+
+    def _load_production_xs_app(self):
+        path = os.path.join(REPO_ROOT, "app", "xs-app.json")
+        with open(path) as f:
+            return json.load(f)
+
+    def test_every_xsuaa_route_selects_sap_custom_idp(self):
+        config = self._load_production_xs_app()
+        xsuaa_routes = [r for r in config["routes"] if r.get("authenticationType") == "xsuaa"]
+        assert len(xsuaa_routes) > 0
+        for route in xsuaa_routes:
+            assert route.get("identityProvider") == self.EXPECTED_IDENTITY_PROVIDER, (
+                f"Route {route.get('source')} with authenticationType=xsuaa must set "
+                f"identityProvider={self.EXPECTED_IDENTITY_PROVIDER!r}"
+            )
+
+    def test_none_auth_routes_do_not_receive_identity_provider(self):
+        config = self._load_production_xs_app()
+        none_routes = [r for r in config["routes"] if r.get("authenticationType") == "none"]
+        assert len(none_routes) > 0
+        for route in none_routes:
+            assert "identityProvider" not in route, (
+                f"Route {route.get('source')} with authenticationType=none must NOT "
+                "set identityProvider"
+            )
+
+    def test_production_destinations_unchanged(self):
+        config = self._load_production_xs_app()
+        destinations = {r["destination"] for r in config["routes"] if r.get("destination")}
+        assert destinations == {"ncoreshift-python", "ncoreshift-srv"}
+
+    def test_production_mta_does_not_introduce_dynamic_identity_provider(self):
+        import yaml
+        path = os.path.join(REPO_ROOT, "mta.yaml")
+        with open(path) as f:
+            mta = yaml.safe_load(f)
+        serialized = json.dumps(mta)
+        assert "DYNAMIC_IDENTITY_PROVIDER" not in serialized

@@ -18,6 +18,7 @@
       "target": "/api/ncoreiq/$1",
       "destination": "ncoreshift-python",
       "authenticationType": "xsuaa",
+      "identityProvider": "sap.custom",
       "csrfProtection": true
     },
     {
@@ -25,6 +26,7 @@
       "target": "/api/$1",
       "destination": "ncoreshift-srv",
       "authenticationType": "xsuaa",
+      "identityProvider": "sap.custom",
       "csrfProtection": true
     },
     {
@@ -43,7 +45,8 @@
       "source": "^/(.*)$",
       "target": "/$1",
       "localDir": "dist",
-      "authenticationType": "xsuaa"
+      "authenticationType": "xsuaa",
+      "identityProvider": "sap.custom"
     }
   ]
 }
