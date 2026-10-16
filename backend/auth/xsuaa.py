@@ -83,6 +83,13 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse
 
+from auth.anonymous_test import (
+    ANONYMOUS_DENY_MESSAGE,
+    AnonymousTestPrincipal,
+    is_anonymous_safe,
+    resolve_auth_mode,
+)
+
 logger = logging.getLogger(__name__)
 
 # ── Constants ─────────────────────────────────────────────────────────────────
@@ -169,9 +176,35 @@ class XSUAAInboundMiddleware(BaseHTTPMiddleware):
 
     def __init__(self, app) -> None:
         super().__init__(app)
+
+        # ── Anonymous test mode resolution (Gate 0E10-AT1A) ────────────────
+        # This call either:
+        #   - returns anonymous_test_active=False (normal/default mode,
+        #     NCORESHIFT_AUTH_MODE is unset or not "anonymous_test"), or
+        #   - returns anonymous_test_active=True (all three Step 4
+        #     requirements satisfied: mode + confirm + correct CF app name),
+        #     or
+        #   - raises RuntimeError (fail closed) if anonymous_test was
+        #     requested but any requirement is missing, or if it was
+        #     requested on the production application name.
+        #
+        # This resolution happens BEFORE the normal XSUAA production check
+        # below, and never weakens it: if anonymous_test is not active,
+        # execution falls through to the existing normal/default behavior
+        # completely unchanged.
+        self._anon_decision = resolve_auth_mode()
         self._is_production: bool = _detect_production()
         self._xsuaa_credentials: Optional[Dict[str, Any]] = None
         self._required_scope: Optional[str] = None
+
+        if self._anon_decision.anonymous_test_active:
+            logger.warning(
+                "[XSUAAMiddleware] anonymous_test mode ACTIVE on application "
+                f"'{self._anon_decision.application_name}'. Normal XSUAA "
+                "authentication is bypassed ONLY for the centralized "
+                "allowlisted routes; every other route is blocked (403)."
+            )
+            return
 
         if self._is_production:
             self._xsuaa_credentials = _resolve_xsuaa_credentials()
@@ -210,6 +243,21 @@ class XSUAAInboundMiddleware(BaseHTTPMiddleware):
             )
 
     async def dispatch(self, request: Request, call_next):
+        # ── Anonymous test mode: centralized allowlist/deny policy ────────
+        # This branch is ONLY reachable when resolve_auth_mode() confirmed
+        # ALL THREE Step 4 requirements at startup (mode + confirm +
+        # correct ncoreshift-test-python CF application identity). Normal
+        # authenticated behavior below is completely unaffected whenever
+        # this is False.
+        if self._anon_decision.anonymous_test_active:
+            if is_anonymous_safe(request.method, request.url.path):
+                request.state.identity = AnonymousTestPrincipal().as_safe_dict()
+                return await call_next(request)
+            return JSONResponse(
+                status_code=403,
+                content={"error": "FORBIDDEN", "message": ANONYMOUS_DENY_MESSAGE},
+            )
+
         # ── Non-production: transparent pass-through ──────────────────────
         if not self._is_production:
             return await call_next(request)

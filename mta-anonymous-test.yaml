@@ -1,0 +1,137 @@
+## N-CoreShift ANONYMOUS TEST ONLY — Multi-Target Application Deployment Descriptor
+## Gate 0E10-AT1A — source-only. This descriptor is NOT deployed by this gate.
+## Target: SAP BTP Cloud Foundry (future, human-reviewed deployment)
+##
+## This is a SEPARATE, ISOLATED deployment unit from the production
+## mta.yaml. It must NEVER be deployed using the same application names
+## as production (ncoreshift-python / ncoreshift-app).
+##
+## Build (future, NOT executed by this gate):
+##   mbt build -p mta-anonymous-test.yaml
+## Deploy (future, NOT executed by this gate — human-reviewed step):
+##   cf deploy mta_archives/ncoreshift-anonymous-test_1.0.0.mtar
+_schema-version: "3.3.0"
+ID: ncoreshift-anonymous-test
+version: 1.0.0
+description: "N-CoreShift — ISOLATED anonymous test mode (no live SAP/N-CoreIQ access)"
+
+parameters:
+  enable-parallel-deployments: true
+
+build-parameters:
+  before-all:
+    - builder: custom
+      commands:
+        - npm ci --include=optional
+        - npm run build --workspace=@n-coreshift/app
+
+modules:
+
+  # ── Python FastAPI backend — TEST IDENTITY ONLY ────────────────────────────
+  # Application name MUST be exactly "ncoreshift-test-python".
+  # The backend's anonymous_test fail-closed guard
+  # (backend/auth/anonymous_test.py) checks VCAP_APPLICATION.application_name
+  # against this exact value before allowing anonymous_test to activate.
+  - name: ncoreshift-test-python
+    type: python
+    path: backend
+    build-parameters:
+      builder: custom
+      commands: []
+      ignore:
+        - .env
+        - .env.*
+        - .env.example
+        - __pycache__/
+        - "*.pyc"
+        - .pytest_cache/
+        - tests/
+        - "*.db"
+        - "*.sqlite"
+        - "*.sqlite3"
+        - "*.log"
+        - coverage/
+        - htmlcov/
+        - uploads/
+        - generated-artifacts/
+        - "*.zip"
+        - "*.mtar"
+        - .vscode/
+        - .idea/
+    parameters:
+      buildpack: python_buildpack
+      memory: 512M
+      disk-quota: 1024M
+      instances: 1
+      health-check-type: http
+      health-check-http-endpoint: /api/health
+    properties:
+      PYTHON_ENV: production
+      ## Gate 0E10-AT1A — isolated anonymous test mode activation.
+      ## Both of these are REQUIRED by backend/auth/anonymous_test.py in
+      ## addition to the CF application identity check above. If either
+      ## is missing, or if this descriptor is ever mistakenly applied to
+      ## ncoreshift-python, the backend fails closed at startup.
+      NCORESHIFT_AUTH_MODE: anonymous_test
+      NCORESHIFT_ANONYMOUS_TEST_CONFIRM: "true"
+      ## N-CoreIQ real access is intentionally NOT configured for this
+      ## test descriptor. ANONYMOUS_REAL_NCOREIQ_ACCESS = NO (Step 7).
+      ## No NCOREIQ_BASE_URL / NCOREIQ_AUTH_MODE is set here — any
+      ## N-CoreIQ route is already blocked server-side regardless.
+    requires:
+      ## Existing XSUAA service referenced ONLY — never created, modified,
+      ## or extracted here. See resource section below (Step 11).
+      - name: ncoreshift-uaa
+    provides:
+      - name: ncoreshift-test-python-api
+        properties:
+          python-url: ${default-url}
+
+  # ── Test AppRouter — TEST IDENTITY ONLY ─────────────────────────────────────
+  # Application name MUST be exactly "ncoreshift-test".
+  # Uses the dedicated test-only xs-app.anonymous-test.json (authenticationType:
+  # none for both frontend and API routes). The backend's own anonymous_test
+  # policy is the authoritative server-side control (Step 6/7).
+  - name: ncoreshift-test
+    type: approuter.nodejs
+    path: app
+    build-parameters:
+      builder: custom
+      commands: []
+      ignore:
+        - node_modules/
+        - .env
+    parameters:
+      memory: 256M
+      disk-quota: 512M
+      health-check-type: port
+    properties:
+      TENANT_HOST_PATTERN: "^(.*)-${default-uri}"
+      ## Use the test-only AppRouter config instead of the production
+      ## xs-app.json. (Mechanism: copy/rename at build time per team
+      ## deployment process — documented, NOT executed by this gate.)
+      XSAPP_CONFIG_FILE: xs-app.anonymous-test.json
+    requires:
+      - name: ncoreshift-uaa
+      - name: ncoreshift-test-python-api
+        group: destinations
+        properties:
+          name: ncoreshift-test-python
+          url: ~{python-url}
+          forwardAuthToken: false
+
+resources:
+
+  # ── Existing XSUAA service — REFERENCE ONLY (Step 11) ──────────────────────
+  # This is declared as an EXISTING service, never created, modified, or
+  # bound with new credentials/service-keys. No "parameters: service: xsuaa"
+  # creation block exists here on purpose.
+  - name: ncoreshift-uaa
+    type: org.cloudfoundry.existing-service
+
+  ## ── NO DIRECT SAP SERVICE BINDINGS (Step 12) ───────────────────────────────
+  ## TEST_BACKEND_DIRECT_SAP_BINDING = NO
+  ## This descriptor intentionally does NOT declare or bind:
+  ##   - ecc-mcp-destination
+  ##   - ecc-mcp-connectivity
+  ## N-CoreShift (test or production) must never directly reach SAP.

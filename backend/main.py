@@ -4,6 +4,7 @@ from database import engine, run_migrations
 import models
 
 from auth.xsuaa import XSUAAInboundMiddleware
+from auth.anonymous_test import resolve_auth_mode
 from routers import projects, objects, analyses, plans, artifacts, dashboard, admin, ncoreiq
 
 # Create all tables (new tables only)
@@ -49,3 +50,18 @@ app.include_router(ncoreiq.router)
 @app.get("/api/health")
 def health():
     return {"success": True, "data": {"status": "ok"}, "message": "N-CoreShift API running"}
+
+
+# ── Gate 0E10-AT1A: safe UI bootstrap endpoint ────────────────────────────────
+# Exposes ONLY whether anonymous_test mode is active so the frontend can
+# render a "TEST MODE — Anonymous Access" banner. Never exposes tokens,
+# credentials, service URLs, destination details, or client IDs/secrets.
+# This endpoint is itself allowlisted in auth/anonymous_test.py
+# (ANONYMOUS_SAFE_ROUTES) so it remains reachable under anonymous_test.
+@app.get("/api/config/bootstrap")
+def bootstrap_config():
+    decision = resolve_auth_mode()
+    return {
+        "success": True,
+        "data": {"anonymousTestMode": decision.anonymous_test_active},
+    }

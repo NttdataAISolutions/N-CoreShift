@@ -1,0 +1,34 @@
+{
+  "_comment": "N-CoreShift TEST-ONLY AppRouter config (Gate 0E10-AT1A). For a FUTURE separate deployment: ncoreshift-test -> no browser login -> ncoreshift-test-python. This file is NOT used by the production AppRouter (app/xs-app.json), which retains authenticationType: xsuaa unchanged. authenticationType: none here is safe ONLY because the server-side anonymous_test policy (backend/auth/anonymous_test.py) enforces a centralized allowlist/deny boundary independently of this file.",
+  "welcomeFile": "/index.html",
+  "authenticationMethod": "route",
+  "sessionTimeout": 30,
+  "destinations": {
+    "ncoreshift-test-python": {
+      "logoutPath": "/do/logout",
+      "logoutMethod": "POST"
+    }
+  },
+  "routes": [
+    {
+      "source": "^/api/ncoreiq/(.*)$",
+      "target": "/api/ncoreiq/$1",
+      "destination": "ncoreshift-test-python",
+      "authenticationType": "none",
+      "csrfProtection": false
+    },
+    {
+      "source": "^/api/(.*)$",
+      "target": "/api/$1",
+      "destination": "ncoreshift-test-python",
+      "authenticationType": "none",
+      "csrfProtection": false
+    },
+    {
+      "source": "^/(.*)$",
+      "target": "/$1",
+      "localDir": "dist",
+      "authenticationType": "none"
+    }
+  ]
+}

@@ -8,6 +8,7 @@ import { AuthProvider, useAuth } from './auth/AuthContext';
 import { TenantProvider } from './auth/TenantContext';
 import { NCSPermission, NCS_PERMISSION } from './auth/types';
 import { AppStoreProvider, useAppStore } from './store/AppStoreContext';
+import AnonymousTestBanner from './components/AnonymousTestBanner';
 import './App.css';
 
 // ── Lazy-loaded pages ────────────────────────────────────────────────────────
@@ -281,6 +282,7 @@ function AppShell() {
 export default function App() {
   return (
     <BrowserRouter>
+      <AnonymousTestBanner />
       <AuthProvider>
         <AppShell />
       </AuthProvider>
