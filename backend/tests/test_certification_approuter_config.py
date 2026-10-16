@@ -21,6 +21,7 @@ but targets the protected certification variant.
 
 import json
 import os
+import re
 
 REPO_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -137,3 +138,155 @@ class TestAnonymousTestAppRouterUnaffectedByProtectedRepair:
             config = json.load(f)
         for route in config["routes"]:
             assert route.get("authenticationType") == "none"
+
+
+class TestProtectedCertificationTenantAwareRoute:
+    """Gate 0E10-LOGIN-R4D — tenant-aware AppRouter route topology repair.
+
+    Validates that mta-certification.yaml module 'ncoreshift-app' exposes
+    both a legacy compatibility route and an explicit tenant-aware route
+    (prefixed with the ntt-tdd-build-demo subaccount subdomain), and that
+    TENANT_HOST_PATTERN correctly captures only that tenant prefix from the
+    tenant-aware hostname — without depending on the ambiguous
+    ${default-uri} placeholder and without hardcoding the regional domain.
+    """
+
+    EXPECTED_TENANT = "ntt-tdd-build-demo"
+    EXPECTED_IDENTITY_PROVIDER = "sap.custom"
+
+    def _load_mta_certification(self):
+        import yaml
+        path = os.path.join(REPO_ROOT, "mta-certification.yaml")
+        with open(path) as f:
+            return yaml.safe_load(f)
+
+    def _approuter_module(self, mta):
+        modules = [m for m in mta["modules"] if m["name"] == "ncoreshift-app"]
+        assert len(modules) == 1
+        return modules[0]
+
+    def test_explicit_routes_parameter_present(self):
+        mta = self._load_mta_certification()
+        module = self._approuter_module(mta)
+        routes = module["parameters"].get("routes")
+        assert routes is not None, "ncoreshift-app module must declare explicit 'routes'"
+        assert isinstance(routes, list)
+        assert len(routes) == 2
+
+    def test_compatibility_route_present(self):
+        mta = self._load_mta_certification()
+        module = self._approuter_module(mta)
+        route_values = [r["route"] for r in module["parameters"]["routes"]]
+        assert "ncoreshift-app.${default-domain}" in route_values
+
+    def test_tenant_aware_route_present_with_correct_prefix(self):
+        mta = self._load_mta_certification()
+        module = self._approuter_module(mta)
+        route_values = [r["route"] for r in module["parameters"]["routes"]]
+        expected_route = f"{self.EXPECTED_TENANT}-ncoreshift-app.${{default-domain}}"
+        assert expected_route in route_values
+
+    def test_legacy_host_domain_parameters_removed(self):
+        mta = self._load_mta_certification()
+        module = self._approuter_module(mta)
+        assert "host" not in module["parameters"], (
+            "Legacy 'host' parameter must be superseded by explicit 'routes'"
+        )
+        assert "domain" not in module["parameters"]
+
+    def test_tenant_host_pattern_does_not_use_default_uri(self):
+        mta = self._load_mta_certification()
+        module = self._approuter_module(mta)
+        pattern = module["properties"]["TENANT_HOST_PATTERN"]
+        assert "default-uri" not in pattern, (
+            "TENANT_HOST_PATTERN must not depend on the ambiguous ${default-uri} "
+            "placeholder once explicit routes are in use"
+        )
+
+    def test_tenant_host_pattern_uses_default_domain_placeholder(self):
+        mta = self._load_mta_certification()
+        module = self._approuter_module(mta)
+        pattern = module["properties"]["TENANT_HOST_PATTERN"]
+        assert "${default-domain}" in pattern
+        assert "cfapps.us10.hana.ondemand.com" not in pattern, (
+            "TENANT_HOST_PATTERN must not hardcode the regional domain"
+        )
+
+    def test_tenant_host_pattern_matches_tenant_aware_hostname_and_captures_tenant(self):
+        mta = self._load_mta_certification()
+        module = self._approuter_module(mta)
+        pattern = module["properties"]["TENANT_HOST_PATTERN"]
+        resolved_pattern = pattern.replace(
+            "${default-domain}", "cfapps.us10.hana.ondemand.com"
+        )
+        tenant_aware_host = f"{self.EXPECTED_TENANT}-ncoreshift-app.cfapps.us10.hana.ondemand.com"
+        match = re.match(resolved_pattern, tenant_aware_host)
+        assert match is not None, "Pattern must match the tenant-aware hostname"
+        assert match.group(1) == self.EXPECTED_TENANT
+
+    def test_tenant_host_pattern_does_not_capture_ncoreshift_app_as_tenant(self):
+        mta = self._load_mta_certification()
+        module = self._approuter_module(mta)
+        pattern = module["properties"]["TENANT_HOST_PATTERN"]
+        resolved_pattern = pattern.replace(
+            "${default-domain}", "cfapps.us10.hana.ondemand.com"
+        )
+        tenant_aware_host = f"{self.EXPECTED_TENANT}-ncoreshift-app.cfapps.us10.hana.ondemand.com"
+        match = re.match(resolved_pattern, tenant_aware_host)
+        assert match is not None
+        assert match.group(1) != "ncoreshift-app"
+
+    def test_tenant_host_pattern_does_not_match_compatibility_hostname(self):
+        """The bare compatibility hostname has no tenant prefix, so the
+        pattern is expected NOT to match it (acceptable: legacy/compat
+        routing only during certification)."""
+        mta = self._load_mta_certification()
+        module = self._approuter_module(mta)
+        pattern = module["properties"]["TENANT_HOST_PATTERN"]
+        resolved_pattern = pattern.replace(
+            "${default-domain}", "cfapps.us10.hana.ondemand.com"
+        )
+        compat_host = "ncoreshift-app.cfapps.us10.hana.ondemand.com"
+        match = re.match(resolved_pattern, compat_host)
+        assert match is None
+
+    def test_protected_identity_provider_still_sap_custom(self):
+        path = os.path.join(REPO_ROOT, "app-certification", "xs-app.json")
+        with open(path) as f:
+            config = json.load(f)
+        xsuaa_routes = [r for r in config["routes"] if r.get("authenticationType") == "xsuaa"]
+        assert len(xsuaa_routes) == 2
+        for route in xsuaa_routes:
+            assert route.get("identityProvider") == self.EXPECTED_IDENTITY_PROVIDER
+
+    def test_no_useridp_or_iot_security_substitution_introduced(self):
+        mta = self._load_mta_certification()
+        serialized = json.dumps(mta)
+        assert "useridp" not in serialized
+        assert "iot-security" not in serialized
+
+    def test_anonymous_test_descriptor_route_config_unchanged(self):
+        """Regression guard: mta-anonymous-test.yaml must retain its
+        ${default-uri}-based TENANT_HOST_PATTERN and must not have gained
+        a tenant-aware route — this repair is scoped only to
+        mta-certification.yaml."""
+        import yaml
+        path = os.path.join(REPO_ROOT, "mta-anonymous-test.yaml")
+        with open(path) as f:
+            mta = yaml.safe_load(f)
+        test_modules = [m for m in mta["modules"] if m["name"] == "ncoreshift-test"]
+        assert len(test_modules) == 1
+        module = test_modules[0]
+        pattern = module["properties"]["TENANT_HOST_PATTERN"]
+        assert pattern == "^(.*)-${default-uri}"
+        assert "routes" not in module["parameters"]
+
+    def test_generic_mta_descriptor_route_config_unchanged(self):
+        """Regression guard: mta.yaml must retain its ${default-uri}-based
+        TENANT_HOST_PATTERN and must not have gained a tenant-aware route."""
+        import yaml
+        path = os.path.join(REPO_ROOT, "mta.yaml")
+        with open(path) as f:
+            mta = yaml.safe_load(f)
+        serialized = json.dumps(mta)
+        assert "ntt-tdd-build-demo" not in serialized

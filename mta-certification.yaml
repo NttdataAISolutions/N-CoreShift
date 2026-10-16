@@ -67,13 +67,15 @@ modules:
         - node_modules/
         - .env
     parameters:
-      host: ncoreshift-app
+      routes:
+        - route: ncoreshift-app.${default-domain}
+        - route: ntt-tdd-build-demo-ncoreshift-app.${default-domain}
       memory: 256M
       disk-quota: 512M
       instances: 1
       health-check-type: port
     properties:
-      TENANT_HOST_PATTERN: "^(.*)-${default-uri}"
+      TENANT_HOST_PATTERN: "^(.*)-ncoreshift-app.${default-domain}"
     requires:
       - name: ncoreshift-uaa
       - name: ncoreshift-python-api
