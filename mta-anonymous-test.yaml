@@ -95,22 +95,31 @@ modules:
   - name: ncoreshift-test
     type: approuter.nodejs
     path: app
+    ## Gate 0E10-AT1A repair — XSAPP_CONFIG_FILE does NOT select the
+    ## runtime xs-app.json for @sap/approuter; the runtime ALWAYS loads
+    ## xs-app.json from the deployed module root. To ensure this test
+    ## AppRouter never loads the production app/xs-app.json, the MTA
+    ## build stages an isolated test-only build-result directory
+    ## (.anonymous-test-approuter-build) containing package.json,
+    ## the built dist/ assets, and xs-app.anonymous-test.json copied
+    ## in as xs-app.json. Only that staged directory is packaged into
+    ## the ncoreshift-test module — app/xs-app.json itself is never
+    ## touched or shipped under this module.
     build-parameters:
       builder: custom
-      commands: []
-      ignore:
-        - node_modules/
-        - .env
+      commands:
+        - rm -rf .anonymous-test-approuter-build
+        - mkdir -p .anonymous-test-approuter-build
+        - cp package.json .anonymous-test-approuter-build/package.json
+        - cp -R dist .anonymous-test-approuter-build/dist
+        - cp xs-app.anonymous-test.json .anonymous-test-approuter-build/xs-app.json
+      build-result: .anonymous-test-approuter-build
     parameters:
       memory: 256M
       disk-quota: 512M
       health-check-type: port
     properties:
       TENANT_HOST_PATTERN: "^(.*)-${default-uri}"
-      ## Use the test-only AppRouter config instead of the production
-      ## xs-app.json. (Mechanism: copy/rename at build time per team
-      ## deployment process — documented, NOT executed by this gate.)
-      XSAPP_CONFIG_FILE: xs-app.anonymous-test.json
     requires:
       - name: ncoreshift-uaa
       - name: ncoreshift-test-python-api

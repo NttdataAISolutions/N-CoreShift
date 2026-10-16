@@ -369,6 +369,54 @@ class Test10_TestMtaUsesSeparateAppNames:
         assert FORBIDDEN_PRODUCTION_APP_NAME not in names
         assert "ncoreshift-app" not in names
 
+    def _get_test_approuter_module(self, mta):
+        modules = [m for m in mta["modules"] if m["name"] == "ncoreshift-test"]
+        assert len(modules) == 1
+        return modules[0]
+
+    def test_test_approuter_build_result_is_isolated_staging_dir(self):
+        """Gate 0E10-AT1A repair: XSAPP_CONFIG_FILE is not an @sap/approuter
+        mechanism. The runtime xs-app.json is selected by staging an
+        isolated build-result directory containing the renamed config."""
+        mta = self._load_mta()
+        module = self._get_test_approuter_module(mta)
+        build_params = module.get("build-parameters", {})
+        assert build_params.get("build-result") == ".anonymous-test-approuter-build"
+
+    def test_test_approuter_build_commands_copy_anonymous_config_as_xs_app(self):
+        mta = self._load_mta()
+        module = self._get_test_approuter_module(mta)
+        commands = module.get("build-parameters", {}).get("commands", [])
+        assert any(
+            "xs-app.anonymous-test.json" in cmd
+            and ".anonymous-test-approuter-build/xs-app.json" in cmd
+            for cmd in commands
+        ), "Expected a build command copying xs-app.anonymous-test.json to .anonymous-test-approuter-build/xs-app.json"
+
+    def test_test_approuter_build_commands_copy_package_json_literally(self):
+        """mbt's custom builder escapes shell glob metacharacters, so
+        'package*.json' is passed to cp literally and fails. The build
+        command must reference package.json explicitly (no glob)."""
+        mta = self._load_mta()
+        module = self._get_test_approuter_module(mta)
+        commands = module.get("build-parameters", {}).get("commands", [])
+        assert not any("*" in cmd for cmd in commands), (
+            "Build commands must not rely on shell glob expansion; "
+            "mbt's custom builder does not expand globs."
+        )
+        assert any(
+            "package.json" in cmd and ".anonymous-test-approuter-build/package.json" in cmd
+            for cmd in commands
+        ), "Expected a build command copying package.json explicitly into .anonymous-test-approuter-build/"
+
+    def test_test_approuter_does_not_use_xsapp_config_file_property(self):
+        """XSAPP_CONFIG_FILE does not select the runtime xs-app.json for
+        @sap/approuter and must not be relied upon as an active property."""
+        mta = self._load_mta()
+        module = self._get_test_approuter_module(mta)
+        properties = module.get("properties", {})
+        assert "XSAPP_CONFIG_FILE" not in properties
+
     def test_no_direct_sap_bindings(self):
         mta = self._load_mta()
         resource_names = [r["name"] for r in mta.get("resources", [])]
