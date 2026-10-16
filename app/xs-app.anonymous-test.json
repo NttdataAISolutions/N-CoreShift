@@ -1,5 +1,4 @@
 {
-  "_comment": "N-CoreShift TEST-ONLY AppRouter config (Gate 0E10-AT1A). For a FUTURE separate deployment: ncoreshift-test -> no browser login -> ncoreshift-test-python. This file is NOT used by the production AppRouter (app/xs-app.json), which retains authenticationType: xsuaa unchanged. authenticationType: none here is safe ONLY because the server-side anonymous_test policy (backend/auth/anonymous_test.py) enforces a centralized allowlist/deny boundary independently of this file.",
   "welcomeFile": "/index.html",
   "authenticationMethod": "route",
   "sessionTimeout": 30,

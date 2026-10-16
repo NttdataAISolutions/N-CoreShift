@@ -328,6 +328,16 @@ class Test8_ProductionXsAppStillXsuaa:
 
 
 class Test9_TestXsAppUsesNoneAuth:
+    def test_no_top_level_comment_property(self):
+        """SAP AppRouter xs-app.json schema does not permit arbitrary
+        top-level properties such as '_comment'. Gate 0E10-AT1A repair:
+        the live AppRouter failed schema validation with
+        'xs-app.json/_comment: Additional properties not allowed'."""
+        path = os.path.join(REPO_ROOT, "app", "xs-app.anonymous-test.json")
+        with open(path) as f:
+            config = json.load(f)
+        assert "_comment" not in config
+
     def test_all_routes_use_none_auth(self):
         path = os.path.join(REPO_ROOT, "app", "xs-app.anonymous-test.json")
         with open(path) as f:
