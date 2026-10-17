@@ -137,6 +137,12 @@ export function NCoreIQConnectModal({
   const [previewObjects, setPreviewObjects] = useState<ObjectEntry[]>([]);
   const [loadingPreview, setLoadingPreview] = useState(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
+  // Explicit object selection (Gate 0E10-AUTH-R2D-SELECT1).
+  // Keyed by "<sap_object_type>::<object_name>" — the stable identity
+  // pair already present on every ObjectEntry returned by /preview.
+  // IMPORTANT: starts empty on every new preview load (no implicit
+  // "select everything" default).
+  const [selectedObjectKeys, setSelectedObjectKeys] = useState<Set<string>>(new Set());
 
   // ── Import step ─────────────────────────────────────────────────────────
   const [importStatus, setImportStatus] = useState<ImportStatus>('idle');
@@ -256,6 +262,9 @@ export function NCoreIQConnectModal({
       const json = await resp.json();
       if (resp.ok && Array.isArray(json.objects)) {
         setPreviewObjects(json.objects as ObjectEntry[]);
+        // Selection resets to empty on every new preview load — explicit
+        // opt-in only, never an implicit "select everything" default.
+        setSelectedObjectKeys(new Set());
         setStep('preview');
       } else {
         setPreviewError(json.error ?? 'Failed to load object preview');
@@ -268,17 +277,56 @@ export function NCoreIQConnectModal({
     }
   }
 
+  // ── Object selection helpers (Gate 0E10-AUTH-R2D-SELECT1) ───────────────
+
+  function objectKey(obj: ObjectEntry): string {
+    return `${obj.sap_object_type}::${obj.object_name}`;
+  }
+
+  function toggleObjectSelection(obj: ObjectEntry) {
+    const key = objectKey(obj);
+    setSelectedObjectKeys((prev) => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
+  }
+
+  function selectAllObjects() {
+    // Select All applies to ALL objects in previewObjects — not just the
+    // first 200 rows rendered in the (possibly truncated) list view.
+    setSelectedObjectKeys(new Set(previewObjects.map(objectKey)));
+  }
+
+  function deselectAllObjects() {
+    setSelectedObjectKeys(new Set());
+  }
+
+  const selectedCount = selectedObjectKeys.size;
+
   // ── Import ──────────────────────────────────────────────────────────────
 
   async function handleStartImport() {
-    if (!selProjectId || !selectedPackages.length) return;
+    // Explicit selection is required — the frontend must never issue an
+    // empty explicit selection request. Selected count must be >= 1.
+    if (!selProjectId || !selectedPackages.length || selectedCount === 0) return;
     setStep('import');
     setImportStatus('running');
     setImportErrors([]);
-    setImportMessage('Starting bulk extraction job…');
+    setImportMessage('Starting import…');
     try {
       const csrfToken = await _ensureCsrfToken();
       const proj = projects.find((p) => p.id === selProjectId);
+      // Build the explicit object selection payload from the stable
+      // identity fields already present on each ObjectEntry — the same
+      // schema the backend's authoritative preview/search returns.
+      const selectedObjects = previewObjects
+        .filter((obj) => selectedObjectKeys.has(objectKey(obj)))
+        .map((obj) => ({
+          sap_object_type: obj.sap_object_type,
+          object_name: obj.object_name,
+        }));
       const resp = await fetch('/api/ncoreiq/import', {
         method: 'POST',
         credentials: 'same-origin',
@@ -292,6 +340,7 @@ export function NCoreIQConnectModal({
           baseUrl: ncoreiqUrl.trim() || undefined,
           packages: selectedPackages,
           include_subpackages: true,
+          objects: selectedObjects,
         }),
       });
       const json = await resp.json();
@@ -492,28 +541,66 @@ export function NCoreIQConnectModal({
         {/* ── Step: Preview ── */}
         {step === 'preview' && (
           <div>
-            <div style={{ fontSize: '.85rem', marginBottom: '.75rem' }}>
-              <strong>{previewObjects.length}</strong> objects found in selected packages.
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '.75rem' }}>
+              <div style={{ fontSize: '.85rem' }}>
+                <strong>{previewObjects.length}</strong> objects found in selected packages.
+                {previewObjects.length > 200 && (
+                  <span style={{ color: 'var(--ncs-muted)' }}> (Showing first 200 of {previewObjects.length} objects)</span>
+                )}
+              </div>
+              <div style={{ fontSize: '.85rem', fontWeight: 600 }}>
+                Selected: {selectedCount} of {previewObjects.length}
+              </div>
             </div>
+
+            <div style={{ display: 'flex', gap: '.5rem', marginBottom: '.75rem' }}>
+              <button onClick={selectAllObjects} style={BTN_SECONDARY} disabled={previewObjects.length === 0}>
+                Select All
+              </button>
+              <button onClick={deselectAllObjects} style={BTN_SECONDARY} disabled={selectedCount === 0}>
+                Deselect All
+              </button>
+            </div>
+
             {previewError && <div style={{ fontSize: '.82rem', color: 'var(--ncs-danger)', marginBottom: '.75rem' }}>{previewError}</div>}
             <div style={{ maxHeight: '260px', overflowY: 'auto', border: '1px solid var(--ncs-border)', borderRadius: '6px', marginBottom: '1rem' }}>
-              {previewObjects.slice(0, 200).map((obj, i) => (
-                <div key={i} style={{ display: 'flex', gap: '1rem', padding: '.4rem .75rem', borderBottom: '1px solid var(--ncs-border)', fontSize: '.82rem' }}>
-                  <span style={{ fontFamily: 'monospace', color: 'var(--ncs-muted)', width: '3.5rem', flexShrink: 0 }}>{obj.sap_object_type}</span>
-                  <span style={{ fontWeight: 600 }}>{obj.object_name}</span>
-                  {obj.description && <span style={{ color: 'var(--ncs-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{obj.description}</span>}
-                </div>
-              ))}
+              {previewObjects.slice(0, 200).map((obj, i) => {
+                const key = objectKey(obj);
+                const checked = selectedObjectKeys.has(key);
+                return (
+                  <label
+                    key={key || i}
+                    style={{
+                      display: 'flex', alignItems: 'center', gap: '1rem', padding: '.4rem .75rem',
+                      borderBottom: '1px solid var(--ncs-border)', fontSize: '.82rem', cursor: 'pointer',
+                    }}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={checked}
+                      onChange={() => toggleObjectSelection(obj)}
+                      aria-label={`Select ${obj.sap_object_type} ${obj.object_name}`}
+                    />
+                    <span style={{ fontFamily: 'monospace', color: 'var(--ncs-muted)', width: '3.5rem', flexShrink: 0 }}>{obj.sap_object_type}</span>
+                    <span style={{ fontWeight: 600 }}>{obj.object_name}</span>
+                    {obj.description && <span style={{ color: 'var(--ncs-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{obj.description}</span>}
+                  </label>
+                );
+              })}
               {previewObjects.length > 200 && (
                 <div style={{ padding: '.5rem .75rem', fontSize: '.8rem', color: 'var(--ncs-muted)' }}>
-                  … and {previewObjects.length - 200} more objects
+                  … and {previewObjects.length - 200} more objects not shown. Select All applies to all {previewObjects.length} objects, including those not visible here.
                 </div>
               )}
             </div>
             <div style={{ display: 'flex', gap: '.75rem', justifyContent: 'flex-end' }}>
               <button onClick={() => setStep('packages')} style={BTN_SECONDARY}>← Back</button>
-              <button onClick={handleStartImport} style={BTN_PRIMARY}>
-                Import {previewObjects.length} Objects →
+              <button
+                onClick={handleStartImport}
+                disabled={selectedCount === 0}
+                style={{ ...BTN_PRIMARY, opacity: selectedCount === 0 ? .5 : 1 }}
+              >
+                Import {selectedCount} Selected Object{selectedCount === 1 ? '' : 's'} →
               </button>
             </div>
           </div>

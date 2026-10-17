@@ -105,12 +105,40 @@ class PreviewRequest(BaseModel):
     max_results: int = 200
 
 
+class ImportObjectRef(BaseModel):
+    """
+    Explicit object selection identifier.
+
+    Mirrors the stable identity fields of the preview/search ObjectEntry
+    schema (sap_object_type + object_name) — the same fields the frontend
+    receives from /api/ncoreiq/preview and uses as the row's unique key.
+    No new/incompatible identifier convention is introduced.
+    """
+    sap_object_type: str
+    object_name: str
+
+
 class ImportRequest(BaseModel):
     baseUrl: Optional[str] = None
     projectId: Optional[str] = None
     projectName: Optional[str] = None
     packages: List[str]
     include_subpackages: bool = True
+    # OPTIONAL explicit object selection (Gate 0E10-AUTH-R2D-SELECT1).
+    #
+    # Backward compatibility (mandatory):
+    #   - objects ABSENT      → legacy package-wide import behavior (unchanged).
+    #   - objects PRESENT,
+    #     non-empty           → ONLY these explicitly selected objects are
+    #                           eligible for import, after server-side
+    #                           validation against the authoritative current
+    #                           package preview/search (see start_import()).
+    #   - objects PRESENT,
+    #     empty []            → REJECTED with a validation error. An empty
+    #                           explicit selection must NEVER be interpreted
+    #                           as "import the entire package" — this is a
+    #                           mandatory safety requirement.
+    objects: Optional[List[ImportObjectRef]] = None
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
@@ -184,19 +212,65 @@ async def start_import(
 
     Returns immediately with jobId for polling.
     """
+    # ── Explicit selection safety validation (Gate 0E10-AUTH-R2D-SELECT1) ──
+    # An explicitly PRESENT but EMPTY objects list must NEVER be treated as
+    # "import the entire package". Reject outright, before any provider or
+    # project-resolution work occurs.
+    if req.objects is not None and len(req.objects) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "error": "EMPTY_OBJECT_SELECTION",
+                "message": "Explicit object selection was provided but is empty. "
+                            "Refusing to fall back to a package-wide import.",
+            },
+        )
+
     provider, base_url = _make_provider(req.baseUrl)
 
     # Resolve project
     project_name = req.projectName or (f"N-CoreIQ Import {req.packages[0]}" if req.packages else "N-CoreIQ Import")
     project_id = NCoreIQSourceProvider.resolve_or_create_project(project_name, db)
 
-    # Discover objects
+    # Discover objects — this is always the AUTHORITATIVE current search,
+    # re-run server-side regardless of what the browser previously displayed.
     try:
         search_result = await provider.preview_objects(req.packages, include_subpackages=req.include_subpackages)
     except NCoreIQError as exc:
         raise _safe_error_response(exc)
 
-    objects_to_import = search_result.get("objects", [])
+    authoritative_objects = search_result.get("objects", [])
+
+    if req.objects is not None:
+        # Explicit selection mode: validate every requested identifier
+        # against the authoritative set. Reject on any mismatch — never
+        # silently drop invalid entries, and never widen the import scope.
+        authoritative_index = {
+            (o.get("sap_object_type"), o.get("object_name")): o
+            for o in authoritative_objects
+        }
+        requested_keys = [(ref.sap_object_type, ref.object_name) for ref in req.objects]
+        unknown = [
+            f"{otype}/{oname}" for (otype, oname) in requested_keys
+            if (otype, oname) not in authoritative_index
+        ]
+        if unknown:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "error": "OBJECT_SELECTION_INVALID",
+                    "message": "One or more selected objects are not present in the "
+                                "authoritative package search and were rejected: "
+                                + ", ".join(unknown[:20]),
+                },
+            )
+        # Build objects_to_import using ONLY authoritative matched entries —
+        # never the raw browser-supplied payload.
+        objects_to_import = [authoritative_index[k] for k in requested_keys]
+    else:
+        # Legacy package-wide behavior — unchanged.
+        objects_to_import = authoritative_objects
+
     count = len(objects_to_import)
 
     if count == 0:
