@@ -58,7 +58,7 @@ class TestProtectedAppCertificationIdentityProviderSelection:
     def test_route_destinations_and_localdirs_unchanged(self):
         config = self._load_protected_xs_app()
         routes = config["routes"]
-        assert len(routes) == 2
+        assert len(routes) == 3
 
         ncoreiq_route = next(r for r in routes if r["source"] == "^/api/ncoreiq/(.*)$")
         assert ncoreiq_route["target"] == "/api/ncoreiq/$1"
@@ -71,7 +71,7 @@ class TestProtectedAppCertificationIdentityProviderSelection:
 
     def test_no_routes_added_or_removed(self):
         config = self._load_protected_xs_app()
-        assert len(config["routes"]) == 2
+        assert len(config["routes"]) == 3
 
     def test_no_dynamic_identity_provider_configuration(self):
         config = self._load_protected_xs_app()
@@ -255,7 +255,7 @@ class TestProtectedCertificationTenantAwareRoute:
         with open(path) as f:
             config = json.load(f)
         xsuaa_routes = [r for r in config["routes"] if r.get("authenticationType") == "xsuaa"]
-        assert len(xsuaa_routes) == 2
+        assert len(xsuaa_routes) == 3
         for route in xsuaa_routes:
             assert route.get("identityProvider") == self.EXPECTED_IDENTITY_PROVIDER
 
@@ -290,3 +290,113 @@ class TestProtectedCertificationTenantAwareRoute:
             mta = yaml.safe_load(f)
         serialized = json.dumps(mta)
         assert "ntt-tdd-build-demo" not in serialized
+
+
+class TestProtectedCertificationProjectsRoute:
+    """Gate 0E10-AUTH-R2D-SINGLE1-FIX1 — protected project-inventory
+    AppRouter route repair.
+
+    Validates that app-certification/xs-app.json now exposes exactly
+    three routes, in order:
+
+        1. ^/api/ncoreiq/(.*)$   -> ncoreshift-python (unchanged)
+        2. ^/api/projects(.*)$  -> ncoreshift-python (new)
+        3. ^/(.*)$              -> static dist catch-all (unchanged)
+
+    and that no broad generic ^/api/(.*)$ backend route was introduced.
+    """
+
+    EXPECTED_IDENTITY_PROVIDER = "sap.custom"
+
+    def _load_protected_xs_app(self):
+        path = os.path.join(REPO_ROOT, "app-certification", "xs-app.json")
+        with open(path) as f:
+            return json.load(f)
+
+    def test_route_count_is_three(self):
+        config = self._load_protected_xs_app()
+        assert len(config["routes"]) == 3
+
+    def test_route_order_ncoreiq_then_projects_then_catchall(self):
+        config = self._load_protected_xs_app()
+        sources = [r["source"] for r in config["routes"]]
+        assert sources == [
+            "^/api/ncoreiq/(.*)$",
+            "^/api/projects(.*)$",
+            "^/(.*)$",
+        ]
+
+    def test_ncoreiq_route_unchanged(self):
+        config = self._load_protected_xs_app()
+        route = config["routes"][0]
+        assert route["source"] == "^/api/ncoreiq/(.*)$"
+        assert route["target"] == "/api/ncoreiq/$1"
+        assert route["destination"] == "ncoreshift-python"
+        assert route["authenticationType"] == "xsuaa"
+        assert route["identityProvider"] == self.EXPECTED_IDENTITY_PROVIDER
+        assert route["csrfProtection"] is True
+
+    def test_projects_route_exact_shape(self):
+        config = self._load_protected_xs_app()
+        route = next(
+            r for r in config["routes"] if r["source"] == "^/api/projects(.*)$"
+        )
+        assert route["target"] == "/api/projects$1"
+        assert route["destination"] == "ncoreshift-python"
+        assert route["authenticationType"] == "xsuaa"
+        assert route["identityProvider"] == self.EXPECTED_IDENTITY_PROVIDER
+        assert route["csrfProtection"] is True
+
+    def test_static_catchall_route_unchanged_and_last(self):
+        config = self._load_protected_xs_app()
+        route = config["routes"][-1]
+        assert route["source"] == "^/(.*)$"
+        assert route["target"] == "/$1"
+        assert route["localDir"] == "dist"
+        assert route["authenticationType"] == "xsuaa"
+        assert route["identityProvider"] == self.EXPECTED_IDENTITY_PROVIDER
+
+    def test_no_generic_backend_api_route_introduced(self):
+        config = self._load_protected_xs_app()
+        sources = [r["source"] for r in config["routes"]]
+        assert "^/api/(.*)$" not in sources
+
+    def test_projects_route_matches_expected_api_paths(self):
+        """Validates the projects route regex covers the required
+        project-inventory API family without altering target mapping."""
+        config = self._load_protected_xs_app()
+        route = next(
+            r for r in config["routes"] if r["source"] == "^/api/projects(.*)$"
+        )
+        pattern = re.compile(route["source"])
+
+        cases = [
+            ("/api/projects", ""),
+            ("/api/projects/1/objects", "/1/objects"),
+            ("/api/projects/1/analysis-results", "/1/analysis-results"),
+        ]
+        for path, expected_capture in cases:
+            match = pattern.match(path)
+            assert match is not None, f"Route must match {path}"
+            assert match.group(1) == expected_capture
+
+            rewritten = route["target"].replace("$1", match.group(1))
+            assert rewritten == path, (
+                f"Rewritten target for {path} must equal the identical "
+                f"Python URL, got {rewritten}"
+            )
+
+    def test_projects_route_does_not_intercept_ncoreiq_paths(self):
+        """Confirms the ncoreiq route, listed first, still matches
+        /api/ncoreiq/* before the projects route would be considered."""
+        config = self._load_protected_xs_app()
+        routes = config["routes"]
+        ncoreiq_pattern = re.compile(routes[0]["source"])
+        assert routes[0]["source"] == "^/api/ncoreiq/(.*)$"
+        match = ncoreiq_pattern.match("/api/ncoreiq/sources")
+        assert match is not None
+
+        projects_pattern = re.compile(routes[1]["source"])
+        assert projects_pattern.match("/api/ncoreiq/sources") is None, (
+            "The projects route pattern must not also match ncoreiq paths"
+        )

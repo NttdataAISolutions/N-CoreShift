@@ -16,6 +16,14 @@
       "csrfProtection": true
     },
     {
+      "source": "^/api/projects(.*)$",
+      "target": "/api/projects$1",
+      "destination": "ncoreshift-python",
+      "authenticationType": "xsuaa",
+      "identityProvider": "sap.custom",
+      "csrfProtection": true
+    },
+    {
       "source": "^/(.*)$",
       "target": "/$1",
       "localDir": "dist",
